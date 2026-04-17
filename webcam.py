@@ -1,6 +1,17 @@
+import os
+import urllib.request
 import cv2
 import numpy as np
 import pyvirtualcam
+
+_MODEL_FILE = "face_landmarker.task"
+_MODEL_URL = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task"
+
+if not os.path.exists(_MODEL_FILE):
+    print("Downloading face landmark model...")
+    urllib.request.urlretrieve(_MODEL_URL, _MODEL_FILE)
+    print("Download complete.")
+
 from utils import read_landmarks, add_mask, face_points
 
 face_elements = ["LIP_LOWER", "LIP_UPPER", "EYEBROW_LEFT", "EYEBROW_RIGHT",

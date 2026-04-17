@@ -1,4 +1,4 @@
 opencv-python==4.13.0.92
-numpy==1.26.4
-mediapipe==0.10.14
+numpy==2.4.4
+mediapipe==0.10.33
 pyvirtualcam==0.15.0

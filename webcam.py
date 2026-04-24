@@ -244,7 +244,7 @@ with pyvirtualcam.Camera(width=width, height=height, fps=30) as cam:
 
             if loaded:
                 for k, v in loaded.items():
-                    colors_map[k] = [v[2], v[1], v[0]]  # RGB → BGR
+                    colors_map[k] = v  # already BGR from OpenCV
 
             rebuild_colors()
 

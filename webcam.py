@@ -18,8 +18,8 @@ face_elements = ["LIP_LOWER", "LIP_UPPER", "EYEBROW_LEFT", "EYEBROW_RIGHT",
                  "EYELINER_LEFT", "EYELINER_RIGHT", "EYESHADOW_LEFT", "EYESHADOW_RIGHT"]
 colors_map = {
     # upper lip and lower lips
-    "LIP_UPPER": [0, 0, 255],  # Red in BGR
-    "LIP_LOWER": [0, 0, 255],  # Red in BGR
+    "LIP_UPPER": [255, 0, 0],  # Red in BGR
+    "LIP_LOWER": [255, 0, 0],  # Red in BGR
     # eyeliner
     "EYELINER_LEFT": [139, 0, 0],  # Dark Blue in BGR
     "EYELINER_RIGHT": [139, 0, 0],  # Dark Blue in BGR
@@ -59,8 +59,19 @@ with pyvirtualcam.Camera(width=width, height=height, fps=fps) as cam:
             mask = add_mask(mask, idx_to_coordinates=landmark_coordinates,
                             face_connections=face_connections, colors=colors)
             output = cv2.addWeighted(frame, 1.0, mask, 0.2, 1.0)
+
+            # hardcoded blush: soft rosy-pink ellipse on each cheek
+            blush_color = (147, 112, 219)  # BGR: rosy pink
+            for key in ("BLUSH_LEFT", "BLUSH_RIGHT"):
+                pt_idx = face_points[key][0]
+                if pt_idx in landmark_coordinates:
+                    cx, cy = landmark_coordinates[pt_idx]
+                    blush_mask = np.zeros_like(frame)
+                    cv2.ellipse(blush_mask, (cx, cy), (25, 15), 0, 0, 360, blush_color, -1)
+                    blush_mask = cv2.GaussianBlur(blush_mask, (61, 61), 25)
+                    output = cv2.addWeighted(output, 1.0, blush_mask, 0.2, 0) #make blush brighter, more noticeable
         except (IndexError, KeyError):
-            output = frame  # no face detected, pass through plain video
+            output = frame  # no face detected, pass throuqgh plain video
 
         # show local preview so you can confirm filter is working
         cv2.imshow("Virtual Makeup Preview (Q to quit)", output)

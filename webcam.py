@@ -15,7 +15,6 @@ if not os.path.exists(_MODEL_FILE):
 from utils import read_landmarks, add_mask, face_points
 
 REFERENCE_IMAGE = "2.jpg"
-
 face_elements = ["LIP_LOWER", "LIP_UPPER", "EYEBROW_LEFT", "EYEBROW_RIGHT",
                  "EYELINER_LEFT", "EYELINER_RIGHT", "EYESHADOW_LEFT", "EYESHADOW_RIGHT"]
 
@@ -93,19 +92,22 @@ lip_colors       = [colors_map[e]  for e in _lip_elements]
 eye_connections  = [face_points[e] for e in _eye_elements]
 eye_colors       = [colors_map[e]  for e in _eye_elements]
 
-def alpha_blend_mask(base, mask, alpha):
-    """Soft alpha blend using mask brightness as per-pixel weight."""
-    base_f = base.astype(np.float32)
-    mask_f = mask.astype(np.float32)
-    peak = mask_f.max()
-    if peak < 1e-6:
-        return base
-    # presence: 1.0 at the center of the feature, smoothly 0 at edges
-    presence = mask_f.max(axis=2, keepdims=True) / peak
-    # recover the actual color regardless of how dark/bright it is
-    pure_color = mask_f / np.where(presence > 0, presence, 1.0)
-    weight = presence * alpha
-    return np.clip(base_f * (1 - weight) + pure_color * weight, 0, 255).astype(np.uint8)
+def precompute_blend(masks_alphas, shape):
+    """Collapse all (mask, alpha) layers into a single (a, b) so per-frame
+    blending is just: clip(frame * a + b). Same result as chaining alpha_blend_mask."""
+    a = np.ones((*shape[:2], 1), dtype=np.float32)
+    b = np.zeros(shape, dtype=np.float32)
+    for mask, alpha in masks_alphas:
+        mask_f = mask.astype(np.float32)
+        peak = mask_f.max()
+        if peak < 1e-6:
+            continue
+        presence = mask_f.max(axis=2, keepdims=True) / peak
+        pure_color = mask_f / np.where(presence > 0, presence, 1.0)
+        w = presence * alpha
+        b = b * (1 - w) + pure_color * w
+        a = a * (1 - w)
+    return a, b
 
 cap = cv2.VideoCapture(0)
 if not cap.isOpened():
@@ -117,49 +119,65 @@ fps    = cap.get(cv2.CAP_PROP_FPS) or 30
 
 print(f"Webcam opened: {width}x{height} @ {fps}fps")
 
+DETECT_SCALE = 0.5  # run MediaPipe at half resolution — ~4x fewer pixels
+
+def landmarks_downscaled(frame):
+    small = cv2.resize(frame, (0, 0), fx=DETECT_SCALE, fy=DETECT_SCALE)
+    lm_small = read_landmarks(small)
+    return {k: (int(x / DETECT_SCALE), int(y / DETECT_SCALE)) for k, (x, y) in lm_small.items()}
+
+_blend_ab = None
+
 with pyvirtualcam.Camera(width=width, height=height, fps=fps) as cam:
     print(f"Virtual camera running: {cam.device}")
     print("Press Q in the preview window to quit.")
     while True:
         ret, frame = cap.read()
         if not ret:
-            continue  # skip bad frames, don't exit
-        # frame = cv2.flip(frame, 1)  # mirror horizontally
+            continue
 
         try:
-            landmark_coordinates = read_landmarks(frame)
+            lm = landmarks_downscaled(frame)
+            masks_alphas = []
+
             mask = np.zeros_like(frame)
-            mask = add_mask(mask, idx_to_coordinates=landmark_coordinates,
+            mask = add_mask(mask, idx_to_coordinates=lm,
                             face_connections=face_connections, colors=colors)
-            output = alpha_blend_mask(frame, mask, 0.4)
+            masks_alphas.append((mask, 0.4))
 
             lip_mask = np.zeros_like(frame)
-            lip_mask = add_mask(lip_mask, idx_to_coordinates=landmark_coordinates,
+            lip_mask = add_mask(lip_mask, idx_to_coordinates=lm,
                                 face_connections=lip_connections, colors=lip_colors)
-            output = alpha_blend_mask(output, lip_mask, 0.7)
+            masks_alphas.append((lip_mask, 0.7))
 
             eye_mask = np.zeros_like(frame)
-            eye_mask = add_mask(eye_mask, idx_to_coordinates=landmark_coordinates,
+            eye_mask = add_mask(eye_mask, idx_to_coordinates=lm,
                                 face_connections=eye_connections, colors=eye_colors)
-            output = alpha_blend_mask(output, eye_mask, 0.5)
+            masks_alphas.append((eye_mask, 0.5))
 
             for key in ("BLUSH_LEFT", "BLUSH_RIGHT"):
                 pt_idx = face_points[key][0]
-                if pt_idx in landmark_coordinates:
-                    cx, cy = landmark_coordinates[pt_idx]
-                    blush_mask = np.zeros_like(frame)
-                    cv2.ellipse(blush_mask, (cx, cy), (25, 15), 0, 0, 360, blush_color, -1)
-                    blush_mask = cv2.GaussianBlur(blush_mask, (61, 61), 25)
-                    output = alpha_blend_mask(output, blush_mask, 0.3)
-        except (IndexError, KeyError):
-            output = frame  # no face detected, pass throuqgh plain video
+                if pt_idx in lm:
+                    cx, cy = lm[pt_idx]
+                    bm = np.zeros_like(frame)
+                    cv2.ellipse(bm, (cx, cy), (25, 15), 0, 0, 360, blush_color, -1)
+                    bm = cv2.GaussianBlur(bm, (61, 61), 25)
+                    masks_alphas.append((bm, 0.3))
 
-        # show local preview so you can confirm filter is working
+            _blend_ab = precompute_blend(masks_alphas, frame.shape)
+        except (IndexError, KeyError):
+            pass
+
+        if _blend_ab is None:
+            output = frame
+        else:
+            a, b = _blend_ab
+            output = np.clip(frame.astype(np.float32) * a + b, 0, 255).astype(np.uint8)
+
         cv2.imshow("Virtual Makeup Preview (Q to quit)", output)
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 
-        # pyvirtualcam expects RGB
         cam.send(cv2.cvtColor(output, cv2.COLOR_BGR2RGB))
         cam.sleep_until_next_frame()
 

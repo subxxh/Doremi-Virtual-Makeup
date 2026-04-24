@@ -14,25 +14,100 @@ if not os.path.exists(_MODEL_FILE):
 
 from utils import read_landmarks, add_mask, face_points
 
+REFERENCE_IMAGE = "2.jpg"
 face_elements = ["LIP_LOWER", "LIP_UPPER", "EYEBROW_LEFT", "EYEBROW_RIGHT",
                  "EYELINER_LEFT", "EYELINER_RIGHT", "EYESHADOW_LEFT", "EYESHADOW_RIGHT"]
-colors_map = {
-    # upper lip and lower lips
-    "LIP_UPPER": [0, 0, 255],  # Red in BGR
-    "LIP_LOWER": [0, 0, 255],  # Red in BGR
-    # eyeliner
-    "EYELINER_LEFT": [139, 0, 0],  # Dark Blue in BGR
-    "EYELINER_RIGHT": [139, 0, 0],  # Dark Blue in BGR
-    # eye shadow
-    "EYESHADOW_LEFT": [0, 100, 0],  # Dark Green in BGR
-    "EYESHADOW_RIGHT": [0, 100, 0],  # Dark Green in BGR
-    # eye brow
-    "EYEBROW_LEFT": [19, 69, 139],  # Dark Brown in BGR
-    "EYEBROW_RIGHT": [19, 69, 139],  # Dark Brown in BGR
+
+_fallback_colors = {
+    "LIP_UPPER":      [0, 0, 200],
+    "LIP_LOWER":      [0, 0, 200],
+    "EYELINER_LEFT":  [139, 0, 0],
+    "EYELINER_RIGHT": [139, 0, 0],
+    "EYESHADOW_LEFT": [0, 100, 0],
+    "EYESHADOW_RIGHT":[0, 100, 0],
+    "EYEBROW_LEFT":   [19, 69, 139],
+    "EYEBROW_RIGHT":  [19, 69, 139],
+    "BLUSH_LEFT":     [147, 112, 219],
+    "BLUSH_RIGHT":    [147, 112, 219],
 }
 
-face_connections = [face_points[idx] for idx in face_elements]
-colors = [colors_map[idx] for idx in face_elements]
+def sample_feature_colors(image_path, elements, fallbacks):
+    img = cv2.imread(image_path)
+    if img is None:
+        print(f"Warning: could not load {image_path}, using default colors.")
+        return fallbacks
+    try:
+        coords = read_landmarks(img)
+        result = {}
+        for key in elements:
+            pts = [coords[i] for i in face_points[key] if i in coords]
+            if not pts:
+                result[key] = fallbacks.get(key, [128, 128, 128])
+                continue
+            if len(pts) == 1:
+                cx, cy = pts[0]
+                patch = img[max(0, cy - 12):cy + 12, max(0, cx - 12):cx + 12]
+                color = patch.mean(axis=(0, 1)) if patch.size > 0 else np.array(fallbacks.get(key, [128, 128, 128]))
+            else:
+                region_mask = np.zeros(img.shape[:2], dtype=np.uint8)
+                cv2.fillPoly(region_mask, [np.array(pts)], 255)
+                pixels = img[region_mask == 255]
+                if len(pixels) > 0:
+                    # keep high-saturation pixels, then take the darker half to avoid light noise
+                    hsv = cv2.cvtColor(pixels.reshape(1, -1, 3), cv2.COLOR_BGR2HSV).reshape(-1, 3)
+                    sat, val = hsv[:, 1], hsv[:, 2]
+                    saturated_idx = sat > sat.mean()
+                    saturated = pixels[saturated_idx]
+                    sat_val = val[saturated_idx]
+                    if len(saturated) > 0:
+                        dark_half = saturated[sat_val <= np.median(sat_val)]
+                        color = dark_half.mean(axis=0) if len(dark_half) > 0 else saturated.mean(axis=0)
+                    else:
+                        color = pixels.mean(axis=0)
+                else:
+                    color = np.array(fallbacks.get(key, [128, 128, 128]))
+            result[key] = [int(v) for v in color]
+        return result
+    except Exception as e:
+        print(f"Warning: color sampling failed ({e}), using defaults.")
+        return fallbacks
+
+_all_elements = face_elements + ["BLUSH_LEFT", "BLUSH_RIGHT"]
+sampled = sample_feature_colors(REFERENCE_IMAGE, _all_elements, _fallback_colors)
+print("Colors sampled from reference image:")
+for k, v in sampled.items():
+    print(f"  {k}: BGR{tuple(v)}")
+
+colors_map = {k: sampled[k] for k in face_elements}
+blush_color = tuple(sampled.get("BLUSH_LEFT", _fallback_colors["BLUSH_LEFT"]))
+
+_lip_elements  = [e for e in face_elements if "LIP" in e]
+_eye_elements  = [e for e in face_elements if "EYESHADOW" in e]
+_base_elements = [e for e in face_elements if e not in _lip_elements and e not in _eye_elements]
+
+face_connections = [face_points[e] for e in _base_elements]
+colors           = [colors_map[e]  for e in _base_elements]
+lip_connections  = [face_points[e] for e in _lip_elements]
+lip_colors       = [colors_map[e]  for e in _lip_elements]
+eye_connections  = [face_points[e] for e in _eye_elements]
+eye_colors       = [colors_map[e]  for e in _eye_elements]
+
+def precompute_blend(masks_alphas, shape):
+    """Collapse all (mask, alpha) layers into a single (a, b) so per-frame
+    blending is just: clip(frame * a + b). Same result as chaining alpha_blend_mask."""
+    a = np.ones((*shape[:2], 1), dtype=np.float32)
+    b = np.zeros(shape, dtype=np.float32)
+    for mask, alpha in masks_alphas:
+        mask_f = mask.astype(np.float32)
+        peak = mask_f.max()
+        if peak < 1e-6:
+            continue
+        presence = mask_f.max(axis=2, keepdims=True) / peak
+        pure_color = mask_f / np.where(presence > 0, presence, 1.0)
+        w = presence * alpha
+        b = b * (1 - w) + pure_color * w
+        a = a * (1 - w)
+    return a, b
 
 cap = cv2.VideoCapture(0)
 if not cap.isOpened():
@@ -44,30 +119,65 @@ fps    = cap.get(cv2.CAP_PROP_FPS) or 30
 
 print(f"Webcam opened: {width}x{height} @ {fps}fps")
 
+DETECT_SCALE = 0.5  # run MediaPipe at half resolution — ~4x fewer pixels
+
+def landmarks_downscaled(frame):
+    small = cv2.resize(frame, (0, 0), fx=DETECT_SCALE, fy=DETECT_SCALE)
+    lm_small = read_landmarks(small)
+    return {k: (int(x / DETECT_SCALE), int(y / DETECT_SCALE)) for k, (x, y) in lm_small.items()}
+
+_blend_ab = None
+
 with pyvirtualcam.Camera(width=width, height=height, fps=fps) as cam:
     print(f"Virtual camera running: {cam.device}")
     print("Press Q in the preview window to quit.")
     while True:
         ret, frame = cap.read()
         if not ret:
-            continue  # skip bad frames, don't exit
-        # frame = cv2.flip(frame, 1)  # mirror horizontally
+            continue
 
         try:
-            landmark_coordinates = read_landmarks(frame)
-            mask = np.zeros_like(frame)
-            mask = add_mask(mask, idx_to_coordinates=landmark_coordinates,
-                            face_connections=face_connections, colors=colors)
-            output = cv2.addWeighted(frame, 1.0, mask, 0.2, 1.0)
-        except (IndexError, KeyError):
-            output = frame  # no face detected, pass through plain video
+            lm = landmarks_downscaled(frame)
+            masks_alphas = []
 
-        # show local preview so you can confirm filter is working
+            mask = np.zeros_like(frame)
+            mask = add_mask(mask, idx_to_coordinates=lm,
+                            face_connections=face_connections, colors=colors)
+            masks_alphas.append((mask, 0.4))
+
+            lip_mask = np.zeros_like(frame)
+            lip_mask = add_mask(lip_mask, idx_to_coordinates=lm,
+                                face_connections=lip_connections, colors=lip_colors)
+            masks_alphas.append((lip_mask, 0.7))
+
+            eye_mask = np.zeros_like(frame)
+            eye_mask = add_mask(eye_mask, idx_to_coordinates=lm,
+                                face_connections=eye_connections, colors=eye_colors)
+            masks_alphas.append((eye_mask, 0.5))
+
+            for key in ("BLUSH_LEFT", "BLUSH_RIGHT"):
+                pt_idx = face_points[key][0]
+                if pt_idx in lm:
+                    cx, cy = lm[pt_idx]
+                    bm = np.zeros_like(frame)
+                    cv2.ellipse(bm, (cx, cy), (25, 15), 0, 0, 360, blush_color, -1)
+                    bm = cv2.GaussianBlur(bm, (61, 61), 25)
+                    masks_alphas.append((bm, 0.3))
+
+            _blend_ab = precompute_blend(masks_alphas, frame.shape)
+        except (IndexError, KeyError):
+            pass
+
+        if _blend_ab is None:
+            output = frame
+        else:
+            a, b = _blend_ab
+            output = np.clip(frame.astype(np.float32) * a + b, 0, 255).astype(np.uint8)
+
         cv2.imshow("Virtual Makeup Preview (Q to quit)", output)
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 
-        # pyvirtualcam expects RGB
         cam.send(cv2.cvtColor(output, cv2.COLOR_BGR2RGB))
         cam.sleep_until_next_frame()
 

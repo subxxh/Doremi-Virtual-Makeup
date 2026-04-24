@@ -62,6 +62,8 @@ def read_landmarks(image: np.array):
 
     # detect facial landmarks (returns normalized points 0 to 477)
     results = _face_landmarker.detect(mp_image)
+    if not results.face_landmarks:
+        return {}
     face_landmarks = results.face_landmarks[0]
 
     # convert normalized points w.r.to image dimensions

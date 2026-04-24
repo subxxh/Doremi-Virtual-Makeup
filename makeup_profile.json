@@ -1,0 +1,52 @@
+{
+    "LIP_LOWER": [
+        43,
+        48,
+        103
+    ],
+    "LIP_UPPER": [
+        31,
+        40,
+        89
+    ],
+    "EYEBROW_LEFT": [
+        39,
+        50,
+        75
+    ],
+    "EYEBROW_RIGHT": [
+        101,
+        115,
+        146
+    ],
+    "EYELINER_LEFT": [
+        46,
+        53,
+        81
+    ],
+    "EYELINER_RIGHT": [
+        108,
+        123,
+        171
+    ],
+    "EYESHADOW_LEFT": [
+        44,
+        52,
+        83
+    ],
+    "EYESHADOW_RIGHT": [
+        102,
+        117,
+        166
+    ],
+    "BLUSH_LEFT": [
+        95,
+        119,
+        182
+    ],
+    "BLUSH_RIGHT": [
+        146,
+        173,
+        243
+    ]
+}

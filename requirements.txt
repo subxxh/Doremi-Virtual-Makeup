@@ -1,5 +1,5 @@
-opencv-python==4.13.0.92
+gradio==4.0.0
 numpy==1.26.4
+opencv-python==4.9.0.80
 mediapipe==0.10.33
 pyvirtualcam==0.15.0
-gradio==4.0.0

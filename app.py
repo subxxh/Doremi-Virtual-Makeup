@@ -1,7 +1,6 @@
-import gradio as gr
+from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 
-def greet(name):
-    return "Hello " + name + "!!"
+app = FastAPI()
 
-demo = gr.Interface(fn=greet, inputs="text", outputs="text")
-demo.launch()
+app.mount("/", StaticFiles(directory="dist", html=True), name="static")

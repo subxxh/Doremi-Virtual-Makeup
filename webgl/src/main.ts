@@ -1,45 +1,168 @@
 import './style.css';
 import { FaceLandmarker, FilesetResolver } from '@mediapipe/tasks-vision';
 import { FacePoints, FaceRegions } from './regions';
+import { clamp01, type Vec2 } from './utils';
+import {
+  DEFAULT_BLUSH_HEX,
+  makeupColors,
+  NOSE_TIP_RGB,
+  concealerColorFromSkin,
+  pinkifyBlush,
+  sampleLiveSkinTone,
+  sampleMeanColorFromEllipse,
+  sampleMeanColorFromPointHull,
+  sampleMeanColorFromPolygon,
+} from './colors';
+import {
+  buildBlushRegion,
+  buildFan,
+  buildRibbon,
+  buildShadowRibbon,
+  buildUnderEyeRegion,
+  buildWingedRibbon,
+  makeCircle,
+  offsetPts,
+  uniqueConcat,
+} from './geometry';
+import { BlendMode, createMakeupRenderer } from './webgl';
+import { initCustomizePanel } from './customize';
+import { initSavedLooksPanel } from './savedLooks';
+import { initAiColorAnalysis, type AiLookVibe } from './aiColorAnalysis';
 
-type Vec2 = { x: number; y: number };
+// =============================================================================
+// HUD bootstrap. Everything in this section runs once at startup to put the
+// initial DOM in place (#gl, #overlay, sliders, status text, upload button)
+// before any module that queries those elements runs.
+// =============================================================================
 
 const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) throw new Error('#app not found');
+
+type SliderDef = {
+  id: string;
+  label: string;
+  color: string;
+  value: number;
+};
+
+const sliderDefs: SliderDef[] = [
+  { id: 'lipIntensity', label: 'Lips', color: '#D4547A', value: 30 },
+  { id: 'concealerIntensity', label: 'Concealer', color: '#E2BB95', value: 24 },
+  { id: 'eyeShadowIntensity', label: 'Eyeshadow', color: '#A06CC3', value: 36 },
+  { id: 'eyeLinerIntensity', label: 'Eyeliner', color: '#5E3B7A', value: 26 },
+  { id: 'browIntensity', label: 'Brows', color: '#8B5A3C', value: 14 },
+  { id: 'blushIntensity', label: 'Blush', color: DEFAULT_BLUSH_HEX, value: 28 },
+  { id: 'noseIntensity', label: 'Nose', color: '#B08572', value: 20 },
+];
+
+const sliderRowsHTML = sliderDefs
+  .map(
+    (s) => `
+      <div class="slider-row" style="--c:${s.color}">
+        <span class="dot"></span>
+        <span class="lbl">${s.label}</span>
+        <div class="track">
+          <div class="fill" data-fill="${s.id}" style="width:${s.value}%"></div>
+          <input id="${s.id}" type="range" min="0" max="100" step="1" value="${s.value}" />
+        </div>
+        <span class="val" data-val="${s.id}">${s.value}%</span>
+      </div>
+    `,
+  )
+  .join('');
 
 app.innerHTML = `
   <div class="stage">
     <canvas id="gl"></canvas>
     <canvas id="overlay"></canvas>
     <div class="hud">
-      <div class="hud-title">Doremi Virtual Makeup (WebGL)</div>
-      <div class="hud-row">Keys: <code>D</code> toggle debug points</div>
-      <div class="hud-row">
+      <div class="hud-title">Doremi Virtual Makeup</div>
+      <div class="hud-hint"><kbd>D</kbd> toggles landmark dots + indices</div>
+      <div class="hud-actions">
         <button id="uploadBtn" type="button">Upload makeup photo</button>
         <input id="fileInput" type="file" accept="image/*" />
+        <button type="button" class="hud-btn-secondary" id="aiColorReadTrigger">AI color read</button>
       </div>
-      <div class="hud-row">
-        Lips <input id="lipIntensity" type="range" min="0" max="100" value="15" />
-      </div>
-      <div class="hud-row">
-        Eyeshadow <input id="eyeShadowIntensity" type="range" min="0" max="100" value="18" />
-      </div>
-      <div class="hud-row">
-        Eyeliner <input id="eyeLinerIntensity" type="range" min="0" max="100" value="20" />
-      </div>
-      <div class="hud-row">
-        Brows <input id="browIntensity" type="range" min="0" max="100" value="16" />
-      </div>
-      <div class="hud-row">
-        Blush <input id="blushIntensity" type="range" min="0" max="100" value="14" />
-      </div>
-      <div class="hud-row">
-        Nose contour <input id="noseIntensity" type="range" min="0" max="100" value="10" />
-      </div>
-      <div class="hud-row" id="status">Loading…</div>
+      <div class="sliders">${sliderRowsHTML}</div>
+      <label class="no-makeup-row">
+        <input type="checkbox" id="noMakeupToggle" />
+        <span>No makeup</span>
+      </label>
+      <div class="hud-status" id="status">Loading…</div>
     </div>
   </div>
 `;
+
+for (const s of sliderDefs) {
+  const input = document.querySelector<HTMLInputElement>(`#${s.id}`);
+  const fill = document.querySelector<HTMLDivElement>(`[data-fill="${s.id}"]`);
+  const val = document.querySelector<HTMLSpanElement>(`[data-val="${s.id}"]`);
+  if (!input || !fill || !val) continue;
+  const sync = () => {
+    fill.style.width = `${input.value}%`;
+    val.textContent = `${input.value}%`;
+  };
+  input.addEventListener('input', sync);
+  sync();
+}
+
+let noMakeupSliderSnapshot: Record<string, number> | null = null;
+
+function setSliderPercentsFromRecord(pctById: Record<string, number>) {
+  for (const [id, pct] of Object.entries(pctById)) {
+    const el = document.querySelector<HTMLInputElement>(`#${id}`);
+    if (!el) continue;
+    el.value = String(pct);
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+}
+
+/** Turn off “No makeup” and restore saved slider values (used before other presets apply). */
+function exitNoMakeupIfNeeded() {
+  const t = document.querySelector<HTMLInputElement>('#noMakeupToggle');
+  if (!t?.checked) return;
+  if (noMakeupSliderSnapshot) {
+    setSliderPercentsFromRecord(noMakeupSliderSnapshot);
+    noMakeupSliderSnapshot = null;
+  }
+  t.checked = false;
+  document.querySelector('.hud .sliders')?.classList.remove('sliders--no-makeup');
+  for (const s of sliderDefs) {
+    const el = document.querySelector<HTMLInputElement>(`#${s.id}`);
+    if (el) el.disabled = false;
+  }
+}
+
+document.querySelector<HTMLInputElement>('#noMakeupToggle')?.addEventListener('change', (e) => {
+  const t = e.target as HTMLInputElement;
+  const slidersEl = document.querySelector('.hud .sliders');
+  if (t.checked) {
+    const snap: Record<string, number> = {};
+    for (const s of sliderDefs) {
+      const el = document.querySelector<HTMLInputElement>(`#${s.id}`);
+      if (el) snap[s.id] = Number(el.value);
+    }
+    noMakeupSliderSnapshot = snap;
+    for (const s of sliderDefs) {
+      const el = document.querySelector<HTMLInputElement>(`#${s.id}`);
+      if (!el) continue;
+      el.value = '0';
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.disabled = true;
+    }
+    slidersEl?.classList.add('sliders--no-makeup');
+  } else {
+    if (noMakeupSliderSnapshot) {
+      setSliderPercentsFromRecord(noMakeupSliderSnapshot);
+      noMakeupSliderSnapshot = null;
+    }
+    for (const s of sliderDefs) {
+      const el = document.querySelector<HTMLInputElement>(`#${s.id}`);
+      if (el) el.disabled = false;
+    }
+    slidersEl?.classList.remove('sliders--no-makeup');
+  }
+});
 
 const glCanvas = document.querySelector<HTMLCanvasElement>('#gl')!;
 const overlayCanvas = document.querySelector<HTMLCanvasElement>('#overlay')!;
@@ -47,13 +170,28 @@ const statusEl = document.querySelector<HTMLDivElement>('#status')!;
 const uploadBtn = document.querySelector<HTMLButtonElement>('#uploadBtn')!;
 const fileInput = document.querySelector<HTMLInputElement>('#fileInput')!;
 const lipIntensityEl = document.querySelector<HTMLInputElement>('#lipIntensity')!;
+const concealerIntensityEl = document.querySelector<HTMLInputElement>('#concealerIntensity')!;
 const eyeShadowIntensityEl = document.querySelector<HTMLInputElement>('#eyeShadowIntensity')!;
 const eyeLinerIntensityEl = document.querySelector<HTMLInputElement>('#eyeLinerIntensity')!;
 const browIntensityEl = document.querySelector<HTMLInputElement>('#browIntensity')!;
 const blushIntensityEl = document.querySelector<HTMLInputElement>('#blushIntensity')!;
 const noseIntensityEl = document.querySelector<HTMLInputElement>('#noseIntensity')!;
 
-let showDebug = true;
+// Initialize the WebGL renderer + customize panel now that all DOM exists.
+const renderer = createMakeupRenderer(glCanvas);
+initCustomizePanel();
+initSavedLooksPanel({
+  makeupColors,
+  sliderIds: sliderDefs.map((s) => s.id),
+  statusEl,
+  beforeRestoreLook: exitNoMakeupIfNeeded,
+});
+
+// =============================================================================
+// Canvas sizing + debug overlay.
+// =============================================================================
+
+let showDebug = false;
 window.addEventListener('keydown', (e) => {
   if (e.key.toLowerCase() === 'd') showDebug = !showDebug;
 });
@@ -71,8 +209,42 @@ window.addEventListener('resize', resizeCanvases);
 resizeCanvases();
 
 const overlay2d = overlayCanvas.getContext('2d')!;
+let lastPointsForDebug: Vec2[] | null = null;
 
-// Hidden <video> source for webcam frames.
+function paintOverlay() {
+  const w = overlayCanvas.width;
+  const h = overlayCanvas.height;
+  overlay2d.clearRect(0, 0, w, h);
+
+  if (showDebug && lastPointsForDebug?.length) {
+    const fontPx = Math.max(9, Math.min(14, Math.floor(w * 0.011)));
+    overlay2d.font = `${fontPx}px ui-monospace, Menlo, monospace`;
+    overlay2d.textAlign = 'left';
+    overlay2d.textBaseline = 'middle';
+    for (let i = 0; i < lastPointsForDebug.length; i++) {
+      const p = lastPointsForDebug[i];
+      const x = (1 - p.x) * w;
+      const y = p.y * h;
+      overlay2d.fillStyle = 'rgba(0, 255, 255, 0.85)';
+      overlay2d.beginPath();
+      overlay2d.arc(x, y, 2.2, 0, Math.PI * 2);
+      overlay2d.fill();
+      const label = String(i);
+      const tx = x + 4;
+      const ty = y;
+      overlay2d.lineWidth = Math.max(2, fontPx * 0.2);
+      overlay2d.strokeStyle = 'rgba(0, 0, 0, 0.92)';
+      overlay2d.strokeText(label, tx, ty);
+      overlay2d.fillStyle = 'rgba(255, 255, 220, 0.95)';
+      overlay2d.fillText(label, tx, ty);
+    }
+  }
+}
+
+// =============================================================================
+// Webcam + face landmarker.
+// =============================================================================
+
 const video = document.createElement('video');
 video.playsInline = true;
 video.muted = true;
@@ -80,16 +252,34 @@ video.autoplay = true;
 video.style.display = 'none';
 document.body.appendChild(video);
 
-// MJPEG <img> source (for OBS Browser Source mode)
-const mjpegImg = document.createElement('img');
-mjpegImg.style.display = 'none';
-document.body.appendChild(mjpegImg);
+/** After “Apply to try-on” from an AI color read, nudge intensities. Natural = stronger; glam/fun = softer (bold colors read loud). */
+function applyPostAiLookSliderPreset(lookVibe: AiLookVibe | null) {
+  exitNoMakeupIfNeeded();
+  const boldOrFun = lookVibe === 'glam' || lookVibe === 'fun';
+  const preset: Record<string, number> = boldOrFun
+    ? {
+        lipIntensity: 22,
+        eyeShadowIntensity: 30,
+        eyeLinerIntensity: 36,
+        blushIntensity: 25,
+      }
+    : {
+        lipIntensity: 60,
+        concealerIntensity: 35,
+        eyeShadowIntensity: 75,
+        eyeLinerIntensity: 37,
+        blushIntensity: 68,
+        noseIntensity: 24,
+      };
+  for (const [id, pct] of Object.entries(preset)) {
+    const el = document.querySelector<HTMLInputElement>(`#${id}`);
+    if (!el) continue;
+    el.value = String(pct);
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+}
 
-type SourceKind = 'camera' | 'mjpeg';
-const params = new URLSearchParams(window.location.search);
-const sourceKind: SourceKind = (params.get('src') === 'mjpeg' ? 'mjpeg' : 'camera');
-// Default to same-origin proxy path (see vite.config.ts) for OBS compatibility.
-const mjpegUrl = params.get('mjpeg') || '/stream.mjpg';
+initAiColorAnalysis({ video, statusEl, onAfterApplyLook: applyPostAiLookSliderPreset });
 
 async function startCamera() {
   const stream = await navigator.mediaDevices.getUserMedia({
@@ -100,535 +290,13 @@ async function startCamera() {
   await video.play();
 }
 
-function clamp01(x: number) {
-  return Math.max(0, Math.min(1, x));
-}
-
-function pointInPolygon(x: number, y: number, poly: Array<[number, number]>) {
-  let inside = false;
-  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
-    const xi = poly[i][0],
-      yi = poly[i][1];
-    const xj = poly[j][0],
-      yj = poly[j][1];
-    const intersect = yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi + 1e-9) + xi;
-    if (intersect) inside = !inside;
-  }
-  return inside;
-}
-
-function sampleMeanColorFromPolygon(
-  ctx: CanvasRenderingContext2D,
-  polyPx: Array<[number, number]>,
-) {
-  if (polyPx.length < 3) return null;
-  let minX = Infinity,
-    minY = Infinity,
-    maxX = -Infinity,
-    maxY = -Infinity;
-  for (const [x, y] of polyPx) {
-    minX = Math.min(minX, x);
-    minY = Math.min(minY, y);
-    maxX = Math.max(maxX, x);
-    maxY = Math.max(maxY, y);
-  }
-  minX = Math.floor(minX);
-  minY = Math.floor(minY);
-  maxX = Math.ceil(maxX);
-  maxY = Math.ceil(maxY);
-  const w = Math.max(1, maxX - minX);
-  const h = Math.max(1, maxY - minY);
-  const img = ctx.getImageData(minX, minY, w, h);
-  const data = img.data;
-
-  let r = 0,
-    g = 0,
-    b = 0,
-    n = 0;
-  for (let yy = 0; yy < h; yy++) {
-    for (let xx = 0; xx < w; xx++) {
-      const px = minX + xx;
-      const py = minY + yy;
-      if (!pointInPolygon(px, py, polyPx)) continue;
-      const idx = (yy * w + xx) * 4;
-      const rr = data[idx];
-      const gg = data[idx + 1];
-      const bb = data[idx + 2];
-      const a = data[idx + 3];
-      if (a < 5) continue;
-      r += rr;
-      g += gg;
-      b += bb;
-      n++;
-    }
-  }
-  if (n < 50) return null;
-  return { r: r / n, g: g / n, b: b / n };
-}
-
-function sampleMeanColorFromEllipse(
-  ctx: CanvasRenderingContext2D,
-  cx: number,
-  cy: number,
-  rx: number,
-  ry: number,
-) {
-  const minX = Math.floor(cx - rx);
-  const minY = Math.floor(cy - ry);
-  const w = Math.max(1, Math.ceil(rx * 2));
-  const h = Math.max(1, Math.ceil(ry * 2));
-  const img = ctx.getImageData(minX, minY, w, h);
-  const data = img.data;
-  let r = 0,
-    g = 0,
-    b = 0,
-    n = 0;
-  for (let yy = 0; yy < h; yy++) {
-    for (let xx = 0; xx < w; xx++) {
-      const x = minX + xx;
-      const y = minY + yy;
-      const dx = (x - cx) / (rx + 1e-9);
-      const dy = (y - cy) / (ry + 1e-9);
-      if (dx * dx + dy * dy > 1) continue;
-      const idx = (yy * w + xx) * 4;
-      const a = data[idx + 3];
-      if (a < 5) continue;
-      r += data[idx];
-      g += data[idx + 1];
-      b += data[idx + 2];
-      n++;
-    }
-  }
-  if (n < 30) return null;
-  return { r: r / n, g: g / n, b: b / n };
-}
-
-function convexHull(points: Vec2[]) {
-  // Monotonic chain hull in normalized coordinates.
-  const pts = [...points].sort((a, b) => (a.x === b.x ? a.y - b.y : a.x - b.x));
-  if (pts.length <= 3) return pts;
-
-  const cross = (o: Vec2, a: Vec2, b: Vec2) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
-  const lower: Vec2[] = [];
-  for (const p of pts) {
-    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop();
-    lower.push(p);
-  }
-  const upper: Vec2[] = [];
-  for (let i = pts.length - 1; i >= 0; i--) {
-    const p = pts[i];
-    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop();
-    upper.push(p);
-  }
-  upper.pop();
-  lower.pop();
-  return lower.concat(upper);
-}
-
-function buildBlushRegion(allPts: Vec2[], centerIdx: number, side: 'left' | 'right') {
-  const c = allPts[centerIdx];
-  if (!c) return { fill: new Float32Array(0), feather: new Float32Array(0), poly: [] as Vec2[] };
-
-  // Pick nearby landmarks around the cheek point; this adapts to face size/pose.
-  const radius = 0.075;
-  const candidates: Vec2[] = [];
-  for (let i = 0; i < allPts.length; i++) {
-    const p = allPts[i];
-    const dx = p.x - c.x;
-    const dy = p.y - c.y;
-    const d2 = dx * dx + dy * dy;
-    if (d2 > radius * radius) continue;
-
-    // Keep it cheekbone-ish: a tighter vertical band prevents spreading to jaw/eye.
-    if (Math.abs(dy) > 0.05) continue;
-    if (side === 'left' && p.x > c.x + 0.02) continue;
-    if (side === 'right' && p.x < c.x - 0.02) continue;
-    candidates.push(p);
-  }
-
-  // If too few points, fall back to a small fan around center using 8 samples.
-  if (candidates.length < 8) {
-    const simple: Vec2[] = [];
-    const r = 0.03;
-    for (let k = 0; k < 16; k++) {
-      const a = (k / 16) * Math.PI * 2;
-      simple.push({ x: clamp01(c.x + Math.cos(a) * r), y: clamp01(c.y + Math.sin(a) * r) });
-    }
-    const fill = buildFan(simple, 0);
-    const feather = buildFan(simple, 0.18);
-    return { fill, feather, poly: simple };
-  }
-
-  const hull = convexHull(candidates);
-  const fill = buildFan(hull, 0);
-  const feather = buildFan(hull, 0.22);
-  return { fill, feather, poly: hull };
-}
-
-async function startMJPEG() {
-  // OBS Browser Source can generally display MJPEG without camera permissions.
-  // We'll use it as our texture source.
-  mjpegImg.src = mjpegUrl;
-  await new Promise<void>((resolve, reject) => {
-    const start = performance.now();
-    const tick = () => {
-      if (mjpegImg.naturalWidth > 0) return resolve();
-      if (performance.now() - start > 8000) return reject(new Error('MJPEG timeout'));
-      requestAnimationFrame(tick);
-    };
-    mjpegImg.onerror = () => reject(new Error('MJPEG failed to load'));
-    tick();
-  });
-}
-
-function compileShader(gl: WebGL2RenderingContext, type: number, src: string) {
-  const s = gl.createShader(type);
-  if (!s) throw new Error('createShader failed');
-  gl.shaderSource(s, src);
-  gl.compileShader(s);
-  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
-    throw new Error(gl.getShaderInfoLog(s) || 'shader compile failed');
-  }
-  return s;
-}
-
-function createProgram(gl: WebGL2RenderingContext, vsSrc: string, fsSrc: string) {
-  const vs = compileShader(gl, gl.VERTEX_SHADER, vsSrc);
-  const fs = compileShader(gl, gl.FRAGMENT_SHADER, fsSrc);
-  const p = gl.createProgram();
-  if (!p) throw new Error('createProgram failed');
-  gl.attachShader(p, vs);
-  gl.attachShader(p, fs);
-  gl.linkProgram(p);
-  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
-    throw new Error(gl.getProgramInfoLog(p) || 'program link failed');
-  }
-  gl.deleteShader(vs);
-  gl.deleteShader(fs);
-  return p;
-}
-
-// WebGL: draw a fullscreen textured quad (the webcam).
-// Request a stencil buffer so we can "cut out" the inner mouth (prevents lipstick on teeth).
-const gl = glCanvas.getContext('webgl2', { alpha: false, antialias: true, stencil: true })!;
-if (!gl) throw new Error('WebGL2 not available');
-
-// Make video textures match 2D/canvas coordinates (prevents upside-down camera).
-gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
-
-const quadVS = `#version 300 es
-in vec2 a_pos;
-out vec2 v_uv;
-void main() {
-  v_uv = (a_pos + 1.0) * 0.5;
-  gl_Position = vec4(a_pos, 0.0, 1.0);
-}`;
-
-const quadFS = `#version 300 es
-precision mediump float;
-uniform sampler2D u_tex;
-in vec2 v_uv;
-out vec4 outColor;
-void main() {
-  // Mirror horizontally (more natural for users + matches typical filters).
-  vec2 uv = vec2(1.0 - v_uv.x, v_uv.y);
-  outColor = texture(u_tex, uv);
-}`;
-
-const quadProgram = createProgram(gl, quadVS, quadFS);
-const quadVAO = gl.createVertexArray()!;
-gl.bindVertexArray(quadVAO);
-const quadBuf = gl.createBuffer()!;
-gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
-gl.bufferData(
-  gl.ARRAY_BUFFER,
-  new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]),
-  gl.STATIC_DRAW,
-);
-const quadPosLoc = gl.getAttribLocation(quadProgram, 'a_pos');
-gl.enableVertexAttribArray(quadPosLoc);
-gl.vertexAttribPointer(quadPosLoc, 2, gl.FLOAT, false, 0, 0);
-gl.bindVertexArray(null);
-
-const videoTex = gl.createTexture()!;
-gl.bindTexture(gl.TEXTURE_2D, videoTex);
-gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-gl.bindTexture(gl.TEXTURE_2D, null);
-
-// Simple GPU lips overlay: triangle-fan polygons blended over the webcam.
-const polyVS = `#version 300 es
-in vec2 a_pos;
-out float v_y;
-void main() {
-  v_y = a_pos.y;
-  gl_Position = vec4(a_pos, 0.0, 1.0);
-}`;
-
-const polyFS = `#version 300 es
-precision mediump float;
-uniform vec4 u_colorTop;
-uniform vec4 u_colorBottom;
-uniform vec2 u_yMinMax; // clip-space y min/max for gradient normalization
-out vec4 outColor;
-in float v_y;
-void main() {
-  float y0 = u_yMinMax.x;
-  float y1 = u_yMinMax.y;
-  float t = 0.5;
-  if (abs(y1 - y0) > 1e-5) {
-    t = clamp((v_y - y0) / (y1 - y0), 0.0, 1.0);
-  }
-  outColor = mix(u_colorTop, u_colorBottom, t);
-}`;
-
-const polyProgram = createProgram(gl, polyVS, polyFS);
-const polyVAO = gl.createVertexArray()!;
-const polyBuf = gl.createBuffer()!;
-const polyPosLoc = gl.getAttribLocation(polyProgram, 'a_pos');
-const polyColorTopLoc = gl.getUniformLocation(polyProgram, 'u_colorTop');
-const polyColorBottomLoc = gl.getUniformLocation(polyProgram, 'u_colorBottom');
-const polyYMinMaxLoc = gl.getUniformLocation(polyProgram, 'u_yMinMax');
-
-type RegionKey = keyof typeof FaceRegions;
-type FeatherKey =
-  | 'LIP_UPPER_FEATHER'
-  | 'LIP_LOWER_FEATHER'
-  | 'EYESHADOW_LEFT_FEATHER'
-  | 'EYESHADOW_RIGHT_FEATHER'
-  | 'BLUSH_LEFT_FEATHER'
-  | 'BLUSH_RIGHT_FEATHER'
-  | 'BLUSH_LEFT'
-  | 'BLUSH_RIGHT'
-  | 'LIP_OUTER'
-  | 'LIP_OUTER_FEATHER'
-  | 'MOUTH_INNER'
-  | 'BROW_LEFT_RIBBON'
-  | 'BROW_RIGHT_RIBBON'
-  | 'BROW_LEFT_RIBBON_FEATHER'
-  | 'BROW_RIGHT_RIBBON_FEATHER'
-  | 'LEFT_EYE'
-  | 'RIGHT_EYE'
-  | 'LINER_LEFT_RIBBON'
-  | 'LINER_RIGHT_RIBBON'
-  | 'LINER_LEFT_RIBBON_FEATHER'
-  | 'LINER_RIGHT_RIBBON_FEATHER'
-  | 'SHADOW_LEFT_RIBBON'
-  | 'SHADOW_RIGHT_RIBBON'
-  | 'SHADOW_LEFT_RIBBON_FEATHER'
-  | 'SHADOW_RIGHT_RIBBON_FEATHER'
-  | 'NOSE_LEFT_RIBBON'
-  | 'NOSE_RIGHT_RIBBON'
-  | 'NOSE_LEFT_RIBBON_FEATHER'
-  | 'NOSE_RIGHT_RIBBON_FEATHER'
-  | 'NOSE_TIP'
-  | 'NOSE_TIP_FEATHER';
-type RegionVerts = Partial<Record<RegionKey | FeatherKey, Float32Array>>;
-const regionVerts: RegionVerts = {};
-
-let lipstickTopRGB: [number, number, number] = [0.85, 0.1, 0.35];
-let lipstickBottomRGB: [number, number, number] = [0.85, 0.1, 0.35];
-let eyeShadowRGB: [number, number, number] = [0.2, 0.4, 0.15];
-let eyeLinerRGB: [number, number, number] = [0.2, 0.05, 0.05];
-let browRGB: [number, number, number] = [0.25, 0.18, 0.12];
-let blushRGB: [number, number, number] = [0.55, 0.35, 0.55];
-
-function normToClip(p: Vec2): [number, number] {
-  // Landmarks are normalized [0..1]. Mirror X to match the mirrored webcam.
-  const x = 1.0 - p.x;
-  const y = p.y;
-  return [x * 2 - 1, (1 - y) * 2 - 1];
-}
-
-function sortAroundCenter(pts: Vec2[], center: Vec2) {
-  return [...pts].sort((a, b) => {
-    const aa = Math.atan2(a.y - center.y, a.x - center.x);
-    const bb = Math.atan2(b.y - center.y, b.x - center.x);
-    return aa - bb;
-  });
-}
-
-function buildFan(pts: Vec2[], expand: number = 0, sortByAngle: boolean = false): Float32Array {
-  if (pts.length < 3) return new Float32Array(0);
-  let cx = 0,
-    cy = 0;
-  for (const p of pts) {
-    cx += p.x;
-    cy += p.y;
-  }
-  cx /= pts.length;
-  cy /= pts.length;
-  const center: Vec2 = { x: cx, y: cy };
-
-  const contour = sortByAngle ? sortAroundCenter(pts, center) : pts;
-
-  const exp = Math.max(0, expand);
-  const expanded = exp > 1e-6;
-
-  const out: number[] = [];
-  const [ccx, ccy] = normToClip(center);
-  for (let i = 0; i < contour.length; i++) {
-    let a = contour[i];
-    let b = contour[(i + 1) % contour.length];
-
-    if (expanded) {
-      const ax = center.x + (a.x - center.x) * (1 + exp);
-      const ay = center.y + (a.y - center.y) * (1 + exp);
-      const bx = center.x + (b.x - center.x) * (1 + exp);
-      const by = center.y + (b.y - center.y) * (1 + exp);
-      a = { x: clamp01(ax), y: clamp01(ay) };
-      b = { x: clamp01(bx), y: clamp01(by) };
-    }
-
-    const [ax, ay] = normToClip(a);
-    const [bx, by] = normToClip(b);
-    out.push(ccx, ccy, ax, ay, bx, by);
-  }
-  return new Float32Array(out);
-}
-
-function clipYMinMax(verts: Float32Array) {
-  // verts are [x,y] pairs in clip space
-  let yMin = Infinity;
-  let yMax = -Infinity;
-  for (let i = 1; i < verts.length; i += 2) {
-    const y = verts[i];
-    if (y < yMin) yMin = y;
-    if (y > yMax) yMax = y;
-  }
-  if (!Number.isFinite(yMin) || !Number.isFinite(yMax)) return { yMin: -1, yMax: 1 };
-  return { yMin, yMax };
-}
-
-function buildRibbon(pts: Vec2[], halfWidth: number, taper: boolean = false): Float32Array {
-  // Build a thick polyline "ribbon" as triangles (better eyebrow/eyeliner than filled polygons).
-  if (pts.length < 2) return new Float32Array(0);
-  const hw = Math.max(0.0005, halfWidth);
-
-  const out: number[] = [];
-
-  const getDir = (a: Vec2, b: Vec2) => {
-    const dx = b.x - a.x;
-    const dy = b.y - a.y;
-    const len = Math.hypot(dx, dy) || 1;
-    return { x: dx / len, y: dy / len };
-  };
-
-  for (let i = 0; i < pts.length; i++) {
-    const p = pts[i];
-    const prev = pts[Math.max(0, i - 1)];
-    const next = pts[Math.min(pts.length - 1, i + 1)];
-
-    const d0 = getDir(prev, p);
-    const d1 = getDir(p, next);
-    // Average direction for smoother joints
-    let dx = d0.x + d1.x;
-    let dy = d0.y + d1.y;
-    const dlen = Math.hypot(dx, dy) || 1;
-    dx /= dlen;
-    dy /= dlen;
-
-    // Perpendicular normal
-    const nx = -dy;
-    const ny = dx;
-
-    let w = hw;
-    if (taper) {
-      const t = pts.length === 1 ? 0.5 : i / (pts.length - 1);
-      // Thin at ends, thick in the middle (more hair-like, less blob).
-      const s = Math.sin(Math.PI * t);
-      w = hw * (0.35 + 0.65 * s);
-    }
-
-    const left: Vec2 = { x: clamp01(p.x + nx * w), y: clamp01(p.y + ny * w) };
-    const right: Vec2 = { x: clamp01(p.x - nx * w), y: clamp01(p.y - ny * w) };
-
-    const [lx, ly] = normToClip(left);
-    const [rx, ry] = normToClip(right);
-    out.push(lx, ly, rx, ry);
-  }
-
-  // Convert strip vertices into triangles (two per segment)
-  const tri: number[] = [];
-  for (let i = 0; i < pts.length - 1; i++) {
-    const i0 = i * 4;
-    const i1 = (i + 1) * 4;
-    // v0L, v0R, v1L, v1R
-    const v0L = [out[i0], out[i0 + 1]];
-    const v0R = [out[i0 + 2], out[i0 + 3]];
-    const v1L = [out[i1], out[i1 + 1]];
-    const v1R = [out[i1 + 2], out[i1 + 3]];
-    // Tri 1: v0L v0R v1L
-    tri.push(v0L[0], v0L[1], v0R[0], v0R[1], v1L[0], v1L[1]);
-    // Tri 2: v1L v0R v1R
-    tri.push(v1L[0], v1L[1], v0R[0], v0R[1], v1R[0], v1R[1]);
-  }
-  return new Float32Array(tri);
-}
-
-function buildWingedRibbon(
-  pts: Vec2[],
-  halfWidth: number,
-  side: 'left' | 'right',
-  wingLen: number,
-): Float32Array {
-  if (pts.length < 2) return new Float32Array(0);
-  // Add one extrapolated point past the outer corner for a small wing.
-  // Outer corner = first point in our upper-lid lists.
-  const corner = pts[0];
-  const next = pts[1];
-  let dx = corner.x - next.x;
-  let dy = corner.y - next.y;
-
-  // Heuristic: force the wing to go "outward" horizontally for each eye.
-  // (Avoids both wings pointing the same direction due to contour ordering / mirroring.)
-  if (side === 'left' && dx > 0) dx = -dx;
-  if (side === 'right' && dx < 0) dx = -dx;
-
-  // Slight upward tilt for a cute wing.
-  dy -= 0.45 * Math.abs(dx);
-
-  const len = Math.hypot(dx, dy) || 1;
-  const ux = dx / len;
-  const uy = dy / len;
-  const wing: Vec2 = { x: clamp01(corner.x + ux * wingLen), y: clamp01(corner.y + uy * wingLen) };
-  const withWing = [wing, ...pts];
-  return buildRibbon(withWing, halfWidth);
-}
-
-function offsetPts(pts: Vec2[], dx: number, dy: number = 0) {
-  return pts.map((p) => ({ x: clamp01(p.x + dx), y: clamp01(p.y + dy) }));
-}
-
-function makeCircle(center: Vec2, r: number, seg = 24) {
-  const pts: Vec2[] = [];
-  for (let i = 0; i < seg; i++) {
-    const a = (i / seg) * Math.PI * 2;
-    pts.push({ x: clamp01(center.x + Math.cos(a) * r), y: clamp01(center.y + Math.sin(a) * r) });
-  }
-  return pts;
-}
-
-function uniqueConcat<T>(a: T[], b: T[]) {
-  const out: T[] = [];
-  const seen = new Set<T>();
-  for (const x of a.concat(b)) {
-    if (seen.has(x)) continue;
-    seen.add(x);
-    out.push(x);
-  }
-  return out;
-}
-
 type LandmarkerMode = 'VIDEO' | 'IMAGE';
 
 async function createLandmarker(mode: LandmarkerMode) {
   const vision = await FilesetResolver.forVisionTasks(
     'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21/wasm',
   );
-  const landmarker = await FaceLandmarker.createFromOptions(vision, {
+  return FaceLandmarker.createFromOptions(vision, {
     baseOptions: {
       modelAssetPath:
         'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task',
@@ -638,30 +306,97 @@ async function createLandmarker(mode: LandmarkerMode) {
     outputFaceBlendshapes: false,
     outputFacialTransformationMatrixes: false,
   });
-  return landmarker;
 }
 
-function drawDebugPoints(points: Vec2[]) {
-  overlay2d.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
-  if (!showDebug) return;
-  overlay2d.fillStyle = 'rgba(0, 255, 255, 0.8)';
-  for (const p of points) {
-    const x = (1 - p.x) * overlayCanvas.width;
-    const y = p.y * overlayCanvas.height;
-    overlay2d.beginPath();
-    overlay2d.arc(x, y, 2.0, 0, Math.PI * 2);
-    overlay2d.fill();
-  }
-}
+// =============================================================================
+// Per-region look tunables. blurStrength is in mask-texels of the 9-tap separable kernel
+// (taps at 1..4 × strength), so effective radius ≈ 4 × strength mask-px. At half-res
+// that's ~0.6 × strength % of canvas height. Intensity caps below 1.0 keep a sliver of
+// skin showing through so makeup reads as pigment, not vinyl.
+// =============================================================================
+
+// Lips: HSL color + small multiply, narrow specular band so only truly blown-out gloss highlights
+// lose pigment. LIP_LUMA_LIFT pulls the transferred luminance toward a brighter midpoint so dark
+// lips don't drag pinks/reds into a grey-brown look at high pigment.
+const LIP_BLUR_STRENGTH = 1.4;
+const LIP_MULTIPLY_MIX = 0.14;
+const LIP_LUMA_LIFT = 0.32;
+const LIP_SPEC = [0.88, 0.99] as const;
+const LIP_INTENSITY_MAX = 0.85;
+
+// Eyeshadow: HSL color with a chunkier multiply mix for richer pigment, large soft blur.
+const SHADOW_BLUR_STRENGTH = 2.4;
+const SHADOW_MULTIPLY_MIX = 0.40;
+const SHADOW_SPEC = [0.85, 0.99] as const;
+const SHADOW_INTENSITY_MAX = 0.65;
+
+// Eyeliner: multiply with the eyeliner color, sharp blur, near-opaque cap so dark liner stays dark.
+const LINER_BLUR_STRENGTH = 0.7;
+const LINER_SPEC = [0.92, 1.00] as const;
+const LINER_INTENSITY_MAX = 0.95;
+
+// Brows: multiply, small blur — fills in sparse hair without painting over the brow shape.
+const BROW_BLUR_STRENGTH = 0.9;
+const BROW_SPEC = [0.92, 1.00] as const;
+const BROW_INTENSITY_MAX = 0.55;
+
+// Blush: soft-light, large diffuse blur — that classic "brushed onto cheekbone" glow.
+const BLUSH_BLUR_STRENGTH = 3.6;
+const BLUSH_SPEC = [0.88, 0.99] as const;
+const BLUSH_INTENSITY_MAX = 0.85;
+
+// Nose contour: multiply with a warm desaturated brown -> soft side shadow on the nose.
+// Multiplied with skin (~0.7) the result darkens by ~30%, giving a believable shadow without going grey.
+const NOSE_CONTOUR_BLUR_STRENGTH = 2.4;
+const NOSE_CONTOUR_SPEC = [0.90, 1.00] as const;
+const NOSE_CONTOUR_INTENSITY_MAX = 0.45;
+
+// Nose tip highlight: screen-blend a soft pink — lifts the tip without flattening it.
+const NOSE_TIP_BLUR_STRENGTH = 3.0;
+const NOSE_TIP_SPEC = [0.95, 1.00] as const;
+const NOSE_TIP_INTENSITY_MAX = 0.45;
+
+// Concealer: soft-light blend with the user's live skin tone (lifted slightly toward warm pale).
+// Soft-light preserves the under-eye texture while quietly evening out dark circles. Big blur
+// keeps the edge invisible — concealer should never have a hard outline.
+const CONCEALER_BLUR_STRENGTH = 3.2;
+const CONCEALER_SPEC = [0.92, 1.00] as const;
+const CONCEALER_INTENSITY_MAX = 0.7;
+
+// =============================================================================
+// Per-frame region polygon storage. Each entry is a Float32Array of clip-space
+// triangle vertices, recomputed when landmarks update.
+// =============================================================================
+
+type RegionVertsKey =
+  | 'LIP_OUTER'
+  | 'MOUTH_INNER'
+  | 'SHADOW_LEFT_RIBBON'
+  | 'SHADOW_RIGHT_RIBBON'
+  | 'EYE_LEFT_MASK'
+  | 'EYE_RIGHT_MASK'
+  | 'LINER_LEFT_RIBBON'
+  | 'LINER_RIGHT_RIBBON'
+  | 'BROW_LEFT_RIBBON'
+  | 'BROW_RIGHT_RIBBON'
+  | 'BLUSH_LEFT'
+  | 'BLUSH_RIGHT'
+  | 'NOSE_LEFT_RIBBON'
+  | 'NOSE_RIGHT_RIBBON'
+  | 'NOSE_TIP'
+  | 'UNDER_EYE_LEFT'
+  | 'UNDER_EYE_RIGHT';
+type RegionVerts = Partial<Record<RegionVertsKey, Float32Array>>;
+const regionVerts: RegionVerts = {};
+
+// =============================================================================
+// Main: kick off the camera, build landmarkers, wire the photo upload, and start
+// the render loop.
+// =============================================================================
 
 async function main() {
-  if (sourceKind === 'mjpeg') {
-    statusEl.textContent = `Loading MJPEG stream…`;
-    await startMJPEG();
-  } else {
-    statusEl.textContent = 'Requesting camera…';
-    await startCamera();
-  }
+  statusEl.textContent = 'Requesting camera…';
+  await startCamera();
 
   statusEl.textContent = 'Loading face model…';
   const [landmarkerVideo, landmarkerImage] = await Promise.all([
@@ -669,14 +404,14 @@ async function main() {
     createLandmarker('IMAGE'),
   ]);
 
-  statusEl.textContent =
-    sourceKind === 'mjpeg'
-      ? `Running (OBS Browser Source mode). MJPEG: ${mjpegUrl}`
-      : 'Running (WebGL + Face Landmarks)…';
+  statusEl.textContent = 'Running (WebGL + Face Landmarks)…';
 
   let lastLipsUpdate = 0;
 
-  // Upload makeup photo → sample lip color → apply to live lipstick tint
+  // -------------------------------------------------------------------------
+  // Photo upload: detect a face in the image, sample makeup colors out of it,
+  // write into `makeupColors`, and bump sliders to a flattering preset.
+  // -------------------------------------------------------------------------
   fileInput.style.display = 'none';
   uploadBtn.addEventListener('click', () => fileInput.click());
   fileInput.addEventListener('change', async () => {
@@ -710,48 +445,91 @@ async function main() {
 
       const lipTop = sampleMeanColorFromPolygon(ctx, toPxPoly(FaceRegions.LIP_UPPER));
       const lipBottom = sampleMeanColorFromPolygon(ctx, toPxPoly(FaceRegions.LIP_LOWER));
-      const lipC = mean2(lipTop, lipBottom);
       if (lipTop)
-        lipstickTopRGB = [clamp01(lipTop.r / 255), clamp01(lipTop.g / 255), clamp01(lipTop.b / 255)];
+        makeupColors.lipstickTop = [clamp01(lipTop.r / 255), clamp01(lipTop.g / 255), clamp01(lipTop.b / 255)];
       if (lipBottom)
-        lipstickBottomRGB = [
+        makeupColors.lipstickBottom = [
           clamp01(lipBottom.r / 255),
           clamp01(lipBottom.g / 255),
           clamp01(lipBottom.b / 255),
         ];
-      if (lipC && !lipTop && !lipBottom) {
-        lipstickTopRGB = [clamp01(lipC.r / 255), clamp01(lipC.g / 255), clamp01(lipC.b / 255)];
-        lipstickBottomRGB = lipstickTopRGB;
-      }
 
-      const shadowC = mean2(
-        sampleMeanColorFromPolygon(ctx, toPxPoly(FaceRegions.EYESHADOW_LEFT)),
-        sampleMeanColorFromPolygon(ctx, toPxPoly(FaceRegions.EYESHADOW_RIGHT)),
+      const creaseL = FaceRegions.EYELID_CREASE_LEFT.map((i) => pts[i]).filter(Boolean) as Vec2[];
+      const creaseR = FaceRegions.EYELID_CREASE_RIGHT.map((i) => pts[i]).filter(Boolean) as Vec2[];
+      const lashL = FaceRegions.EYELID_LASH_LEFT.map((i) => pts[i]).filter(Boolean) as Vec2[];
+      const lashR = FaceRegions.EYELID_LASH_RIGHT.map((i) => pts[i]).filter(Boolean) as Vec2[];
+      const shadowCrease = mean2(
+        sampleMeanColorFromPointHull(ctx, creaseL, bmp.width, bmp.height),
+        sampleMeanColorFromPointHull(ctx, creaseR, bmp.width, bmp.height),
       );
-      if (shadowC) eyeShadowRGB = [clamp01(shadowC.r / 255), clamp01(shadowC.g / 255), clamp01(shadowC.b / 255)];
+      const shadowLash = mean2(
+        sampleMeanColorFromPointHull(ctx, lashL, bmp.width, bmp.height),
+        sampleMeanColorFromPointHull(ctx, lashR, bmp.width, bmp.height),
+      );
+      if (shadowCrease)
+        makeupColors.eyeShadowCrease = [
+          clamp01(shadowCrease.r / 255),
+          clamp01(shadowCrease.g / 255),
+          clamp01(shadowCrease.b / 255),
+        ];
+      if (shadowLash)
+        makeupColors.eyeShadowLash = [
+          clamp01(shadowLash.r / 255),
+          clamp01(shadowLash.g / 255),
+          clamp01(shadowLash.b / 255),
+        ];
+      if (shadowCrease && !shadowLash) makeupColors.eyeShadowLash = [...makeupColors.eyeShadowCrease];
+      if (!shadowCrease && shadowLash) makeupColors.eyeShadowCrease = [...makeupColors.eyeShadowLash];
 
       const linerC = mean2(
         sampleMeanColorFromPolygon(ctx, toPxPoly(FaceRegions.EYELINER_LEFT)),
         sampleMeanColorFromPolygon(ctx, toPxPoly(FaceRegions.EYELINER_RIGHT)),
       );
-      if (linerC) eyeLinerRGB = [clamp01(linerC.r / 255), clamp01(linerC.g / 255), clamp01(linerC.b / 255)];
+      if (linerC)
+        makeupColors.eyeLiner = [clamp01(linerC.r / 255), clamp01(linerC.g / 255), clamp01(linerC.b / 255)];
 
       const browC = mean2(
         sampleMeanColorFromPolygon(ctx, toPxPoly(FaceRegions.EYEBROW_LEFT)),
         sampleMeanColorFromPolygon(ctx, toPxPoly(FaceRegions.EYEBROW_RIGHT)),
       );
-      if (browC) browRGB = [clamp01(browC.r / 255), clamp01(browC.g / 255), clamp01(browC.b / 255)];
+      if (browC)
+        makeupColors.brow = [clamp01(browC.r / 255), clamp01(browC.g / 255), clamp01(browC.b / 255)];
 
       const blushL = pts[FacePoints.BLUSH_LEFT];
       const blushR = pts[FacePoints.BLUSH_RIGHT];
-      // Use a small ellipse for sampling color (shape on your face is handled by a polygon).
+      // Use a small ellipse for sampling color (shape on the face is handled by a polygon).
       const blushC = mean2(
         blushL ? sampleMeanColorFromEllipse(ctx, blushL.x * bmp.width, blushL.y * bmp.height, 18, 12) : null,
         blushR ? sampleMeanColorFromEllipse(ctx, blushR.x * bmp.width, blushR.y * bmp.height, 18, 12) : null,
       );
-      if (blushC) blushRGB = [clamp01(blushC.r / 255), clamp01(blushC.g / 255), clamp01(blushC.b / 255)];
+      if (blushC) {
+        const sampled: [number, number, number] = [
+          clamp01(blushC.r / 255),
+          clamp01(blushC.g / 255),
+          clamp01(blushC.b / 255),
+        ];
+        makeupColors.blush = pinkifyBlush(sampled);
+      }
 
-      statusEl.textContent = 'Makeup photo applied (lips + eyes + brows + blush).';
+      exitNoMakeupIfNeeded();
+
+      // Photo-sampled colors render fairly subtly at the default slider values, so on a fresh
+      // upload bump each slider to a known-flattering preset. We dispatch 'input' so the existing
+      // sync handler updates the fill width and the % label too. Brows are left untouched.
+      const photoPresets: ReadonlyArray<[HTMLInputElement, number]> = [
+        [lipIntensityEl, 41],
+        [concealerIntensityEl, 36],
+        [eyeShadowIntensityEl, 72],
+        [eyeLinerIntensityEl, 41],
+        [blushIntensityEl, 56],
+        [noseIntensityEl, 25],
+      ];
+      for (const [input, value] of photoPresets) {
+        input.value = String(value);
+        input.dispatchEvent(new Event('input'));
+      }
+
+      statusEl.textContent = 'Makeup photo applied.';
     } catch (e) {
       console.error(e);
       statusEl.textContent = `Photo failed: ${String(e)}`;
@@ -760,258 +538,212 @@ async function main() {
     }
   });
 
+  // -------------------------------------------------------------------------
+  // Render loop.
+  // -------------------------------------------------------------------------
   function frame() {
     resizeCanvases();
-    gl.viewport(0, 0, glCanvas.width, glCanvas.height);
+    renderer.syncMaskFbosToCanvas();
 
-    // Upload latest webcam frame to the texture.
-    const canUploadVideo = sourceKind === 'camera' && video.readyState >= 2;
-    const canUploadMJPEG = sourceKind === 'mjpeg' && mjpegImg.complete && mjpegImg.naturalWidth > 0;
-    if (canUploadVideo || canUploadMJPEG) {
-      gl.bindTexture(gl.TEXTURE_2D, videoTex);
-      gl.texImage2D(
-        gl.TEXTURE_2D,
-        0,
-        gl.RGB,
-        gl.RGB,
-        gl.UNSIGNED_BYTE,
-        canUploadVideo ? video : mjpegImg,
-      );
-    }
+    // 1) Upload latest webcam frame + draw it as the background quad.
+    const videoReady = video.readyState >= 2;
+    if (videoReady) renderer.uploadVideoFrame(video);
+    renderer.drawVideoQuad();
 
-    // 1) Draw webcam quad
-    gl.disable(gl.BLEND);
-    gl.useProgram(quadProgram);
-    gl.bindVertexArray(quadVAO);
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, videoTex);
-    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-    gl.bindVertexArray(null);
-
-    // 2) Update landmarks (throttled)
+    // 2) Update landmarks (throttled to ~25Hz).
     const now = performance.now();
-    const doLandmarks = now - lastLipsUpdate > 40; // ~25Hz
-    const srcReady = canUploadVideo || canUploadMJPEG;
-    const srcEl = canUploadVideo ? video : mjpegImg;
-    if (doLandmarks && srcReady) {
-      // detectForVideo accepts ImageSource types; for MJPEG we still provide a timestamp.
-      const res = landmarkerVideo.detectForVideo(srcEl as unknown as HTMLVideoElement, now);
+    const doLandmarks = now - lastLipsUpdate > 40;
+    if (doLandmarks && videoReady) {
+      const res = landmarkerVideo.detectForVideo(video, now);
       const face = res.faceLandmarks?.[0];
       if (face && face.length) {
         const pts = face.map((p) => ({ x: p.x, y: p.y }));
-        drawDebugPoints(pts);
+        lastPointsForDebug = pts;
 
-        // Build both normal and slightly-expanded fans for feathered edges.
-        // (Draw expanded low-alpha under the normal fill.)
-        regionVerts.LIP_UPPER = buildFan(FaceRegions.LIP_UPPER.map((idx) => pts[idx]).filter(Boolean));
-        regionVerts.LIP_LOWER = buildFan(FaceRegions.LIP_LOWER.map((idx) => pts[idx]).filter(Boolean));
-        regionVerts.LIP_UPPER_FEATHER = buildFan(
-          FaceRegions.LIP_UPPER.map((idx) => pts[idx]).filter(Boolean),
-          0.06,
-        );
-        regionVerts.LIP_LOWER_FEATHER = buildFan(
-          FaceRegions.LIP_LOWER.map((idx) => pts[idx]).filter(Boolean),
-          0.06,
-        );
-
-        // Better lip mask: outer lips minus inner mouth opening.
+        // Lip mask = outer lips minus inner mouth opening (so lipstick doesn't paint on teeth).
         const lipOuterIdx = uniqueConcat(
           [...FaceRegions.LIP_UPPER],
           [...FaceRegions.LIP_LOWER],
         );
         const lipOuterPts = lipOuterIdx.map((idx) => pts[idx]).filter(Boolean);
-        regionVerts.LIP_OUTER = buildFan(lipOuterPts, 0);
-        regionVerts.LIP_OUTER_FEATHER = buildFan(lipOuterPts, 0.06);
+        regionVerts.LIP_OUTER = buildFan(lipOuterPts);
         regionVerts.MOUTH_INNER = buildFan(
           FaceRegions.MOUTH_INNER.map((idx) => pts[idx]).filter(Boolean),
-          0,
         );
 
-        // Eyeshadow: draw as a thick upper-lid ribbon (one continuous piece, avoids polygon self-intersections)
-        // This also naturally avoids painting the eyeball, so we don't need stencil cutouts.
-        const shadowLeft = FaceRegions.EYELID_UPPER_LEFT.map((idx) => pts[idx]).filter(Boolean);
-        const shadowRightRaw = FaceRegions.EYELID_UPPER_RIGHT.map((idx) => pts[idx]).filter(Boolean);
-        const shadowRight =
-          shadowRightRaw.length >= 2 && shadowRightRaw[0].x < shadowRightRaw[shadowRightRaw.length - 1].x
-            ? [...shadowRightRaw].reverse()
-            : shadowRightRaw;
-
-        regionVerts.SHADOW_LEFT_RIBBON = buildRibbon(shadowLeft, 0.014);
-        regionVerts.SHADOW_RIGHT_RIBBON = buildRibbon(shadowRight, 0.014);
-        regionVerts.SHADOW_LEFT_RIBBON_FEATHER = buildRibbon(shadowLeft, 0.020);
-        regionVerts.SHADOW_RIGHT_RIBBON_FEATHER = buildRibbon(shadowRight, 0.020);
-
-        regionVerts.EYELINER_LEFT = buildFan(
-          FaceRegions.EYELINER_LEFT.map((idx) => pts[idx]).filter(Boolean),
+        // Eyeshadow: crease -> lash strip per eye. Eye-ball masks subtract from the
+        // mask so shadow doesn't bleed onto the eyeball.
+        regionVerts.SHADOW_LEFT_RIBBON = buildShadowRibbon(
+          pts, FaceRegions.EYELID_CREASE_LEFT, FaceRegions.EYELID_LASH_LEFT,
         );
-        regionVerts.EYELINER_RIGHT = buildFan(
-          FaceRegions.EYELINER_RIGHT.map((idx) => pts[idx]).filter(Boolean),
+        regionVerts.SHADOW_RIGHT_RIBBON = buildShadowRibbon(
+          pts, FaceRegions.EYELID_CREASE_RIGHT, FaceRegions.EYELID_LASH_RIGHT,
+        );
+        regionVerts.EYE_LEFT_MASK = buildFan(FaceRegions.LEFT_EYE.map((idx) => pts[idx]).filter(Boolean));
+        regionVerts.EYE_RIGHT_MASK = buildFan(FaceRegions.RIGHT_EYE.map((idx) => pts[idx]).filter(Boolean));
+
+        // Brows: thin tapered ribbon along the upper-brow points.
+        regionVerts.BROW_LEFT_RIBBON = buildRibbon(
+          FaceRegions.EYEBROW_LEFT.map((idx) => pts[idx]).filter(Boolean), 0.0042, true,
+        );
+        regionVerts.BROW_RIGHT_RIBBON = buildRibbon(
+          FaceRegions.EYEBROW_RIGHT.map((idx) => pts[idx]).filter(Boolean), 0.0042, true,
         );
 
-        regionVerts.EYEBROW_LEFT = buildFan(
-          FaceRegions.EYEBROW_LEFT.map((idx) => pts[idx]).filter(Boolean),
-        );
-        regionVerts.EYEBROW_RIGHT = buildFan(
-          FaceRegions.EYEBROW_RIGHT.map((idx) => pts[idx]).filter(Boolean),
-        );
-
-        // Eyebrows: use a ribbon stroke instead of a filled polygon (prevents blob/bleed)
-        const browLeftPts = FaceRegions.EYEBROW_LEFT.map((idx) => pts[idx]).filter(Boolean);
-        const browRightPts = FaceRegions.EYEBROW_RIGHT.map((idx) => pts[idx]).filter(Boolean);
-        // Thinner, tapered brow strokes to avoid "blobby" spill outside the brow line.
-        regionVerts.BROW_LEFT_RIBBON = buildRibbon(browLeftPts, 0.0042, true);
-        regionVerts.BROW_RIGHT_RIBBON = buildRibbon(browRightPts, 0.0042, true);
-        regionVerts.BROW_LEFT_RIBBON_FEATHER = buildRibbon(browLeftPts, 0.0065, true);
-        regionVerts.BROW_RIGHT_RIBBON_FEATHER = buildRibbon(browRightPts, 0.0065, true);
-
-        // Eyeliner: thin upper-lid ribbon + small wing at outer corner.
-        // Only draw outer part of the upper lid (avoid heavy inner-corner liner).
+        // Eyeliner: thin upper-lid ribbon + small wing. Right lid polyline is inner -> outer in
+        // index order, so reverse for the liner only (winged-ribbon code expects the outer corner first).
         const lidLeftFull = FaceRegions.EYELID_UPPER_LEFT.map((idx) => pts[idx]).filter(Boolean);
-        // Ensure the first point is the OUTER corner for the right eye (some lists are ordered inner->outer).
-        const lidRightFullRaw = FaceRegions.EYELID_UPPER_RIGHT.map((idx) => pts[idx]).filter(Boolean);
-        const lidRightFull =
-          lidRightFullRaw.length >= 2 && lidRightFullRaw[0].x < lidRightFullRaw[lidRightFullRaw.length - 1].x
-            ? [...lidRightFullRaw].reverse()
-            : lidRightFullRaw;
-
-        const lidLeft = lidLeftFull.slice(0, Math.min(5, lidLeftFull.length));
-        const lidRight = lidRightFull.slice(0, Math.min(5, lidRightFull.length));
-        // Smaller wing length for a subtle cat-eye.
+        const lidRightFull = FaceRegions.EYELID_UPPER_RIGHT.map((idx) => pts[idx]).filter(Boolean);
+        const linerLidPts = 5;
+        const lidLeft = lidLeftFull.slice(0, Math.min(linerLidPts, lidLeftFull.length));
+        const lidRight = [...lidRightFull].reverse().slice(0, Math.min(linerLidPts, lidRightFull.length));
         regionVerts.LINER_LEFT_RIBBON = buildWingedRibbon(lidLeft, 0.0032, 'left', 0.012);
         regionVerts.LINER_RIGHT_RIBBON = buildWingedRibbon(lidRight, 0.0032, 'right', 0.012);
-        regionVerts.LINER_LEFT_RIBBON_FEATHER = buildWingedRibbon(lidLeft, 0.0052, 'left', 0.014);
-        regionVerts.LINER_RIGHT_RIBBON_FEATHER = buildWingedRibbon(lidRight, 0.0052, 'right', 0.014);
 
-        // Blush regions from nearby-landmark hulls (more natural than ovals)
-        const leftBlush = buildBlushRegion(pts, FacePoints.BLUSH_LEFT, 'left');
-        const rightBlush = buildBlushRegion(pts, FacePoints.BLUSH_RIGHT, 'right');
-        regionVerts.BLUSH_LEFT = leftBlush.fill;
-        regionVerts.BLUSH_RIGHT = rightBlush.fill;
-        regionVerts.BLUSH_LEFT_FEATHER = leftBlush.feather;
-        regionVerts.BLUSH_RIGHT_FEATHER = rightBlush.feather;
+        // Blush hulls — convex hull around landmarks near each cheekbone point.
+        regionVerts.BLUSH_LEFT = buildBlushRegion(pts, FacePoints.BLUSH_LEFT, 'left');
+        regionVerts.BLUSH_RIGHT = buildBlushRegion(pts, FacePoints.BLUSH_RIGHT, 'right');
 
-        // Nose contour: take ridge points and offset left/right into side shadows.
+        // Nose contour: ridge points offset to either side of the bridge.
         const ridge = FaceRegions.NOSE_RIDGE.map((idx) => pts[idx]).filter(Boolean);
-        const noseLeft = offsetPts(ridge, -0.018);
-        const noseRight = offsetPts(ridge, 0.018);
-        regionVerts.NOSE_LEFT_RIBBON = buildRibbon(noseLeft, 0.006, true);
-        regionVerts.NOSE_RIGHT_RIBBON = buildRibbon(noseRight, 0.006, true);
-        regionVerts.NOSE_LEFT_RIBBON_FEATHER = buildRibbon(noseLeft, 0.010, true);
-        regionVerts.NOSE_RIGHT_RIBBON_FEATHER = buildRibbon(noseRight, 0.010, true);
+        regionVerts.NOSE_LEFT_RIBBON = buildRibbon(offsetPts(ridge, -0.018), 0.006, true);
+        regionVerts.NOSE_RIGHT_RIBBON = buildRibbon(offsetPts(ridge, 0.018), 0.006, true);
 
-        // Nose tip "button nose" highlight/contour (small soft patch)
+        // Nose tip soft patch for the screen-mode highlight.
         const tip = pts[FacePoints.NOSE_TIP];
         if (tip) {
-          const tipCircle = makeCircle(tip, 0.022, 22);
-          regionVerts.NOSE_TIP = buildFan(tipCircle, 0, true);
-          regionVerts.NOSE_TIP_FEATHER = buildFan(tipCircle, 0.25, true);
+          regionVerts.NOSE_TIP = buildFan(makeCircle(tip, 0.022, 22), true);
         }
 
+        // Under-eye crescents for concealer.
+        regionVerts.UNDER_EYE_LEFT = buildUnderEyeRegion(pts, FaceRegions.UNDER_EYE_LEFT_LID);
+        regionVerts.UNDER_EYE_RIGHT = buildUnderEyeRegion(pts, FaceRegions.UNDER_EYE_RIGHT_LID);
+
+        // Live skin-tone sample (forehead) — drives the concealer color.
+        sampleLiveSkinTone(video, pts);
+
         lastLipsUpdate = now;
+      } else {
+        lastPointsForDebug = null;
       }
     }
 
-    // 3) Draw makeup polygons (GPU)
-    const drawRegion = (
-      verts: Float32Array | undefined,
-      rgbTop: [number, number, number],
-      rgbBottom: [number, number, number],
-      alpha: number,
-      yMinMax?: { yMin: number; yMax: number },
-    ) => {
-      if (!verts || verts.length === 0 || alpha <= 0) return;
-      gl.enable(gl.BLEND);
-      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-      gl.useProgram(polyProgram);
-      gl.bindVertexArray(polyVAO);
-      gl.bindBuffer(gl.ARRAY_BUFFER, polyBuf);
-      gl.bufferData(gl.ARRAY_BUFFER, verts, gl.DYNAMIC_DRAW);
-      gl.enableVertexAttribArray(polyPosLoc);
-      gl.vertexAttribPointer(polyPosLoc, 2, gl.FLOAT, false, 0, 0);
-      gl.uniform4f(polyColorTopLoc, rgbTop[0], rgbTop[1], rgbTop[2], clamp01(alpha));
-      gl.uniform4f(polyColorBottomLoc, rgbBottom[0], rgbBottom[1], rgbBottom[2], clamp01(alpha));
-      const mm = yMinMax ?? clipYMinMax(verts);
-      gl.uniform2f(polyYMinMaxLoc, mm.yMin, mm.yMax);
-      gl.drawArrays(gl.TRIANGLES, 0, verts.length / 2);
-      gl.bindVertexArray(null);
-      gl.disable(gl.BLEND);
-    };
+    // 3) Draw makeup. Each region runs the same mask -> blur -> composite path
+    //    via renderer.drawMakeupRegion(), with a per-region blend mode picked to
+    //    match how that product behaves on real skin (multiply for pigment that
+    //    darkens, soft-light for diffuse cheek tints, screen for highlights, HSL
+    //    "color" for lipstick/shadow that needs the underlying luminance preserved).
+    //
+    //    Sliders go straight to intensity (0..1) — the per-region *_INTENSITY_MAX
+    //    constants are the makeup-style cap.
+    const lipSlider       = clamp01(Number(lipIntensityEl.value) / 100);
+    const concealerSlider = clamp01(Number(concealerIntensityEl.value) / 100);
+    const shadowSlider    = clamp01(Number(eyeShadowIntensityEl.value) / 100);
+    const linerSlider     = clamp01(Number(eyeLinerIntensityEl.value) / 100);
+    const browSlider      = clamp01(Number(browIntensityEl.value) / 100);
+    const blushSlider     = clamp01(Number(blushIntensityEl.value) / 100);
+    const noseSlider      = clamp01(Number(noseIntensityEl.value) / 100);
 
-    const lipA = clamp01(Number(lipIntensityEl.value) / 100);
-    const shadowA = clamp01(Number(eyeShadowIntensityEl.value) / 100);
-    const linerA = clamp01(Number(eyeLinerIntensityEl.value) / 100);
-    const browA = clamp01(Number(browIntensityEl.value) / 100);
-    const blushA = clamp01(Number(blushIntensityEl.value) / 100);
-    const noseA = clamp01(Number(noseIntensityEl.value) / 100);
+    // Lips: HSL color blend so the lip's own highlights / shape survive; tight spec band keeps gloss.
+    renderer.drawMakeupRegion({
+      add: [regionVerts.LIP_OUTER],
+      subtract: [regionVerts.MOUTH_INNER],
+      blurStrength: LIP_BLUR_STRENGTH,
+      topRGB: makeupColors.lipstickTop,
+      bottomRGB: makeupColors.lipstickBottom,
+      intensity: lipSlider * LIP_INTENSITY_MAX,
+      blendMode: BlendMode.HSLColor,
+      multiplyMix: LIP_MULTIPLY_MIX,
+      lumaLift: LIP_LUMA_LIFT,
+      specGuard: LIP_SPEC,
+    });
 
-    // Lips with mouth hole (stencil): draw only on lips, not teeth/mouth interior.
-    if (lipA > 0 && regionVerts.LIP_OUTER && regionVerts.MOUTH_INNER) {
-      const lipMM = clipYMinMax(regionVerts.LIP_OUTER);
-      // 1) Build stencil = 1 for outer lips
-      gl.enable(gl.STENCIL_TEST);
-      gl.clearStencil(0);
-      gl.clear(gl.STENCIL_BUFFER_BIT);
-      gl.stencilMask(0xff);
-      gl.stencilFunc(gl.ALWAYS, 1, 0xff);
-      gl.stencilOp(gl.KEEP, gl.KEEP, gl.REPLACE);
-      gl.colorMask(false, false, false, false);
-      drawRegion(regionVerts.LIP_OUTER, [0, 0, 0], [0, 0, 0], 1, lipMM);
-
-      // 2) Carve out inner mouth: set stencil back to 0
-      gl.stencilFunc(gl.ALWAYS, 0, 0xff);
-      gl.stencilOp(gl.KEEP, gl.KEEP, gl.REPLACE);
-      drawRegion(regionVerts.MOUTH_INNER, [0, 0, 0], [0, 0, 0], 1, lipMM);
-
-      // 3) Render lipstick only where stencil==1
-      gl.colorMask(true, true, true, true);
-      gl.stencilFunc(gl.EQUAL, 1, 0xff);
-      gl.stencilOp(gl.KEEP, gl.KEEP, gl.KEEP);
-
-      drawRegion(regionVerts.LIP_OUTER_FEATHER, lipstickTopRGB, lipstickBottomRGB, lipA * 0.35, lipMM);
-      drawRegion(regionVerts.LIP_OUTER, lipstickTopRGB, lipstickBottomRGB, lipA, lipMM);
-
-      gl.disable(gl.STENCIL_TEST);
+    // Concealer: soft-light with the user's live skin tone (lifted ~half a shade). Drawn BEFORE
+    // the eye products so eyeshadow/liner read on top of it. Eye-ball masks subtracted so
+    // we never paint over the eye itself, just the tear-trough/upper-cheek band.
+    if (concealerSlider > 0) {
+      const concealerRGB = concealerColorFromSkin(makeupColors.liveSkinTone);
+      renderer.drawMakeupRegion({
+        add: [regionVerts.UNDER_EYE_LEFT, regionVerts.UNDER_EYE_RIGHT],
+        subtract: [regionVerts.EYE_LEFT_MASK, regionVerts.EYE_RIGHT_MASK],
+        blurStrength: CONCEALER_BLUR_STRENGTH,
+        topRGB: concealerRGB,
+        bottomRGB: concealerRGB,
+        intensity: concealerSlider * CONCEALER_INTENSITY_MAX,
+        blendMode: BlendMode.SoftLight,
+        specGuard: CONCEALER_SPEC,
+      });
     }
 
-    // Eyeshadow (upper-lid ribbon + feather)
-    drawRegion(regionVerts.SHADOW_LEFT_RIBBON_FEATHER, eyeShadowRGB, eyeShadowRGB, shadowA * 0.20);
-    drawRegion(regionVerts.SHADOW_RIGHT_RIBBON_FEATHER, eyeShadowRGB, eyeShadowRGB, shadowA * 0.20);
-    drawRegion(regionVerts.SHADOW_LEFT_RIBBON, eyeShadowRGB, eyeShadowRGB, shadowA * 0.80);
-    drawRegion(regionVerts.SHADOW_RIGHT_RIBBON, eyeShadowRGB, eyeShadowRGB, shadowA * 0.80);
+    // Eyeshadow: one pass for both eyes (same color, mirrored regions); each eyeball masked out.
+    renderer.drawMakeupRegion({
+      add: [regionVerts.SHADOW_LEFT_RIBBON, regionVerts.SHADOW_RIGHT_RIBBON],
+      subtract: [regionVerts.EYE_LEFT_MASK, regionVerts.EYE_RIGHT_MASK],
+      blurStrength: SHADOW_BLUR_STRENGTH,
+      topRGB: makeupColors.eyeShadowCrease,
+      bottomRGB: makeupColors.eyeShadowLash,
+      intensity: shadowSlider * SHADOW_INTENSITY_MAX,
+      blendMode: BlendMode.HSLColor,
+      multiplyMix: SHADOW_MULTIPLY_MIX,
+      specGuard: SHADOW_SPEC,
+    });
 
-    // Eyeliner (upper lid + wing)
-    drawRegion(regionVerts.LINER_LEFT_RIBBON_FEATHER, eyeLinerRGB, eyeLinerRGB, linerA * 0.22);
-    drawRegion(regionVerts.LINER_RIGHT_RIBBON_FEATHER, eyeLinerRGB, eyeLinerRGB, linerA * 0.22);
-    drawRegion(regionVerts.LINER_LEFT_RIBBON, eyeLinerRGB, eyeLinerRGB, linerA * 0.85);
-    drawRegion(regionVerts.LINER_RIGHT_RIBBON, eyeLinerRGB, eyeLinerRGB, linerA * 0.85);
+    // Eyeliner: multiply with the dark liner color; small blur keeps the line crisp but not jaggy.
+    renderer.drawMakeupRegion({
+      add: [regionVerts.LINER_LEFT_RIBBON, regionVerts.LINER_RIGHT_RIBBON],
+      blurStrength: LINER_BLUR_STRENGTH,
+      topRGB: makeupColors.eyeLiner,
+      bottomRGB: makeupColors.eyeLiner,
+      intensity: linerSlider * LINER_INTENSITY_MAX,
+      blendMode: BlendMode.Multiply,
+      specGuard: LINER_SPEC,
+    });
 
-    // Brows (ribbon + feather). This hugs real eyebrow shape better.
-    drawRegion(regionVerts.BROW_LEFT_RIBBON_FEATHER, browRGB, browRGB, browA * 0.12);
-    drawRegion(regionVerts.BROW_RIGHT_RIBBON_FEATHER, browRGB, browRGB, browA * 0.12);
-    drawRegion(regionVerts.BROW_LEFT_RIBBON, browRGB, browRGB, browA * 0.55);
-    drawRegion(regionVerts.BROW_RIGHT_RIBBON, browRGB, browRGB, browA * 0.55);
+    // Brows: multiply, low cap. Reads as filling in sparse hairs rather than painting on a brow.
+    renderer.drawMakeupRegion({
+      add: [regionVerts.BROW_LEFT_RIBBON, regionVerts.BROW_RIGHT_RIBBON],
+      blurStrength: BROW_BLUR_STRENGTH,
+      topRGB: makeupColors.brow,
+      bottomRGB: makeupColors.brow,
+      intensity: browSlider * BROW_INTENSITY_MAX,
+      blendMode: BlendMode.Multiply,
+      specGuard: BROW_SPEC,
+    });
 
-    // Blush (feather then fill), using cheek-shaped polygons
-    if (blushA > 0) {
-      drawRegion(regionVerts.BLUSH_LEFT_FEATHER, blushRGB, blushRGB, blushA * 0.22);
-      drawRegion(regionVerts.BLUSH_RIGHT_FEATHER, blushRGB, blushRGB, blushA * 0.22);
-      drawRegion(regionVerts.BLUSH_LEFT, blushRGB, blushRGB, blushA * 0.45);
-      drawRegion(regionVerts.BLUSH_RIGHT, blushRGB, blushRGB, blushA * 0.45);
+    // Blush: soft-light + heavy diffuse blur for that "brushed onto cheekbone" glow.
+    renderer.drawMakeupRegion({
+      add: [regionVerts.BLUSH_LEFT, regionVerts.BLUSH_RIGHT],
+      blurStrength: BLUSH_BLUR_STRENGTH,
+      topRGB: makeupColors.blush,
+      bottomRGB: makeupColors.blush,
+      intensity: blushSlider * BLUSH_INTENSITY_MAX,
+      blendMode: BlendMode.SoftLight,
+      specGuard: BLUSH_SPEC,
+    });
+
+    // Nose contour (multiply warm dark) + nose-tip highlight (screen soft pink).
+    if (noseSlider > 0) {
+      renderer.drawMakeupRegion({
+        add: [regionVerts.NOSE_LEFT_RIBBON, regionVerts.NOSE_RIGHT_RIBBON],
+        blurStrength: NOSE_CONTOUR_BLUR_STRENGTH,
+        topRGB: makeupColors.noseContour,
+        bottomRGB: makeupColors.noseContour,
+        intensity: noseSlider * NOSE_CONTOUR_INTENSITY_MAX,
+        blendMode: BlendMode.Multiply,
+        specGuard: NOSE_CONTOUR_SPEC,
+      });
+      renderer.drawMakeupRegion({
+        add: [regionVerts.NOSE_TIP],
+        blurStrength: NOSE_TIP_BLUR_STRENGTH,
+        topRGB: NOSE_TIP_RGB,
+        bottomRGB: NOSE_TIP_RGB,
+        intensity: noseSlider * NOSE_TIP_INTENSITY_MAX,
+        blendMode: BlendMode.Screen,
+        specGuard: NOSE_TIP_SPEC,
+      });
     }
 
-    // Nose contour (very subtle, should not look like stripes)
-    if (noseA > 0) {
-      const contourRGB: [number, number, number] = [0.12, 0.08, 0.06]; // warm shadow
-      drawRegion(regionVerts.NOSE_LEFT_RIBBON_FEATHER, contourRGB, contourRGB, noseA * 0.10);
-      drawRegion(regionVerts.NOSE_RIGHT_RIBBON_FEATHER, contourRGB, contourRGB, noseA * 0.10);
-      drawRegion(regionVerts.NOSE_LEFT_RIBBON, contourRGB, contourRGB, noseA * 0.20);
-      drawRegion(regionVerts.NOSE_RIGHT_RIBBON, contourRGB, contourRGB, noseA * 0.20);
-
-      // Button-nose tip: subtle rosy highlight (common "cute" effect)
-      const tipRGB: [number, number, number] = [0.95, 0.55, 0.70];
-      drawRegion(regionVerts.NOSE_TIP_FEATHER, tipRGB, tipRGB, noseA * 0.08);
-      drawRegion(regionVerts.NOSE_TIP, tipRGB, tipRGB, noseA * 0.14);
-    }
+    paintOverlay();
 
     requestAnimationFrame(frame);
   }

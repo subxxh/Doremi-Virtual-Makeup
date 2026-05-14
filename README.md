@@ -12,8 +12,7 @@
 ## Demo
 
 - Live on Hugging Face Spaces: <https://huggingface.co/spaces/subxxh/BlushedCV>
-- Short video / GIF walkthrough
-
+  
 ## Tech Stack
 
 - **Backend:** FastAPI, Python 3.10

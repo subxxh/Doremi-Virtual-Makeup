@@ -1,11 +1,9 @@
 """
-Serves the landing page at / and the Vite WebGL SPA at /app,
-and exposes a small vision API for AI makeup color reads.
+BlushedCV — serves landing page at /, WebGL makeup app at /app,
+and AI color analysis at /api/analyze-makeup-colors.
 
-**Hugging Face Space:** add a repository secret named `GEMINI_API_KEY`.
-Create a key: https://aistudio.google.com/apikey
-
-Without a key, `POST /api/analyze-makeup-colors` returns HTTP 503.
+Hugging Face: add a Space secret named GEMINI_API_KEY.
+Get a free key at: https://aistudio.google.com/apikey
 """
 
 from __future__ import annotations
@@ -42,47 +40,31 @@ Return ONLY valid JSON (no markdown fences) with exactly these keys:
 - headline: string, max ~70 chars, warm and clear, no emoji
 - vibe_tags: array of 3 to 6 short strings (micro-trend tags like "coquette blush" / "clean girl")
 - undertone_read: string, 2-3 sentences, soft language ("reads warm-neutral…"), beauty read only — not clinical
-- lip_colors: array of 2-4 strings (color directions + finishes, e.g. "dusty rose satin") — favor pink, rose, mauve, soft berry, MLBB rose; avoid peachy/coral/orange-forward lip reads unless the style brief says otherwise
+- lip_colors: array of 2-4 strings (color directions + finishes, e.g. "dusty rose satin")
 - eye_colors: array of 2-4 strings (shadow/liner directions)
-- blush_colors: array of 2-3 strings — favor pink, rose, cool pink, soft raspberry; avoid yellow-orange, terracotta-forward, or heavy coral unless the style brief says otherwise
+- blush_colors: array of 2-3 strings
 - liner_brow: string, one friendly sentence for liner + brow harmony
-- tips: array of 2-4 short actionable tips (blend edges, balance warmth, etc.)
-- confidence_note: string, one sentence: lighting/angle limits the read
-- disclaimer: string, always exactly "" (empty — do not add legal, medical, or disclaimer sentences)
-- look_hex: object with EXACTLY these keys, each a CSS hex string "#RRGGBB" (6 hex digits, uppercase preferred):
-  - lip: main lipstick color that matches lip_colors (prefer pink-rose-mauve-red family in hex; not orange-yellow dominant)
-  - eye_shadow: primary eyeshadow for lids/crease that matches eye_colors
-  - liner: eyeliner (often deep brown or black)
-  - brow: brow fill that harmonizes with hair/photo
-  - blush: cheek color that matches blush_colors (prefer pink-red-rose hex; not hot yellow-orange dominant)
-The five look_hex colors must be realistic makeup pigments (not neon unless the look calls for it) and must visually harmonize with the text color suggestions.
-Tone: friendly, kind, body-positive, inclusive. No insults, no harsh judgments, no certainty about "what you are".
-Do not mention model names or policies. English only.
-The user message begins with a STYLE BRIEF the user chose (natural / glam / fun). Follow that brief for every field, including vibe_tags and look_hex."""
+- tips: array of 2-4 short actionable tips
+- confidence_note: string, one sentence about lighting/angle limits
+- disclaimer: string, always exactly ""
+- look_hex: object with EXACTLY these keys, each a CSS hex string "#RRGGBB":
+  - lip, eye_shadow, liner, brow, blush
+Tone: friendly, kind, body-positive, inclusive. English only."""
 
 _ALLOWED_LOOK_VIBES = frozenset({"natural", "glam", "fun"})
 
 _LOOK_VIBE_INSTRUCTIONS: dict[str, str] = {
     "natural": (
-        "STYLE BRIEF — NATURAL / EVERYDAY: Cute, flattering, believable soft glam for real life — \"no-makeup makeup\" "
-        "or polished everyday. Lips and blush must lean PINK / ROSE / MAUVE / soft BERRY / MLBB rose — sweet, fresh, "
-        "romantic. Do NOT steer lips or blush toward yellow, orange, peach-coral, terracotta, or brown-orange; those "
-        "read dated or sallow on many faces here. Eyeshadow and liner stay soft and harmonious. look_hex.lip and "
-        "look_hex.blush must be clearly pink-red family (enough blue/magenta vs pure orange). Cohesive in daylight, "
-        "not heavy stage makeup."
+        "STYLE BRIEF — NATURAL / EVERYDAY: soft glam, pink/rose/mauve lips and blush, "
+        "no orange/coral/terracotta. look_hex.lip and look_hex.blush must be pink-red family."
     ),
     "glam": (
-        "STYLE BRIEF — GLAM (BOLD): Evening-ready or special-occasion — richer pigment, smokier or deeper eyes, "
-        "bolder lip, sharper liner, defined brows — still flattering, not costume. Lips and blush stay in the CUTE "
-        "PINK–RED–ROSE–BERRY–MAUVE lane (bold is fine: deeper rose, wine-stain, fuchsia-rose blush). Avoid "
-        "orange-red, brick-orange, heavy coral, or yellow-peach blush/lip stories; no \"warm pumpkin\" cheeks. "
-        "look_hex.lip and look_hex.blush should read clearly pink or red-rose, not orange-dominant."
+        "STYLE BRIEF — GLAM (BOLD): evening-ready, deeper pigment, smoky eyes, bold lip. "
+        "Stay in pink-red-rose-berry-mauve lane. look_hex.lip and look_hex.blush clearly pink or red-rose."
     ),
     "fun": (
-        "STYLE BRIEF — FUN / PLAYFUL: Creative, expressive, trend-forward — colored liner, vivid blush, playful shadow. "
-        "When describing cheeks and lips, still default toward pink-red-rose playful tones rather than orange-peach "
-        "unless you deliberately pick one contrasting accent. Keep it joyful and tasteful. look_hex stays one "
-        "coordinated look."
+        "STYLE BRIEF — FUN / PLAYFUL: creative, trend-forward, colored liner, vivid blush. "
+        "Default toward pink-red-rose tones. look_hex stays one coordinated look."
     ),
 }
 
@@ -104,7 +86,7 @@ def _normalize_hex_color(value: str) -> str:
 def _validate_look_hex(data: dict[str, Any]) -> None:
     lh = data.get("look_hex")
     if not isinstance(lh, dict):
-        raise HTTPException(status_code=502, detail="Model JSON missing or invalid look_hex (expected object).")
+        raise HTTPException(status_code=502, detail="Model JSON missing look_hex.")
     out: dict[str, str] = {}
     for k in _LOOK_HEX_KEYS:
         v = lh.get(k)
@@ -132,17 +114,24 @@ def _parse_analysis_json(raw: str) -> dict[str, Any]:
         raise HTTPException(status_code=502, detail=f"Model returned invalid JSON: {e}") from e
 
 
-# ── Landing page at / ──
+# ── Landing page ──
 @app.get("/")
 async def landing():
     return FileResponse(str(_ROOT / "index.html"))
 
-# ── app.html at /app ──
+
+# ── WebGL app — handles /app and any sub-paths for SPA routing ──
 @app.get("/app")
-async def makeup_app():
-    return FileResponse(str(_ROOT / "app.html"))
+@app.get("/app/{full_path:path}")
+async def makeup_app(full_path: str = ""):
+    if full_path:
+        candidate = _DIST / full_path
+        if candidate.is_file():
+            return FileResponse(str(candidate))
+    return FileResponse(str(_DIST / "index.html"))
 
 
+# ── AI makeup color analysis ──
 @app.post("/api/analyze-makeup-colors")
 async def analyze_makeup_colors(
     image: UploadFile = File(...),
@@ -152,10 +141,7 @@ async def analyze_makeup_colors(
     if not api_key:
         raise HTTPException(
             status_code=503,
-            detail=(
-                "GEMINI_API_KEY is not set. "
-                "Hugging Face: add a Space secret named GEMINI_API_KEY."
-            ),
+            detail="GEMINI_API_KEY is not set. Add it as a Space secret in HF Settings.",
         )
 
     body = await image.read()
@@ -185,20 +171,16 @@ async def analyze_makeup_colors(
         raise HTTPException(status_code=400, detail=f"Could not read image: {e!s}") from e
 
     model = genai.GenerativeModel(model_name=model_name, system_instruction=SYSTEM_PROMPT)
-
     style_block = _LOOK_VIBE_INSTRUCTIONS[vibe_key]
     user_text = (
         f"{style_block}\n\n"
         "Look at this face snapshot. Suggest flattering makeup COLOR directions "
-        "(not exact products). Reply with JSON only, following the schema from your instructions. "
-        "look_hex must match the lip, eye, blush, liner, and brow directions you describe."
+        "(not exact products). Reply with JSON only. look_hex must match your color suggestions."
     )
 
     def _quota_retry_delay(exc: BaseException) -> float:
         m = re.search(r"retry in ([\d.]+)s", str(exc), re.I)
-        if m:
-            return min(35.0, float(m.group(1)) + 0.5)
-        return 7.0
+        return min(35.0, float(m.group(1)) + 0.5) if m else 7.0
 
     def _is_quota_error(exc: BaseException) -> bool:
         s = str(exc).lower()
@@ -249,8 +231,5 @@ async def analyze_makeup_colors(
     return {"ok": True, "analysis": data}
 
 
-# Static assets (favicon, icons, style.css, assets/) served from root
-app.mount("/assets", StaticFiles(directory=str(_ROOT / "assets")), name="assets")
-
-# WebGL app static files served at /app/ path
-app.mount("/app", StaticFiles(directory=str(_DIST), html=True), name="webgl")
+# ── Serve all other static files (favicon, icons, css, /assets/) ──
+app.mount("/", StaticFiles(directory=str(_ROOT), html=False), name="root-static")

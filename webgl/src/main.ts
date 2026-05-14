@@ -28,6 +28,7 @@ import { BlendMode, createMakeupRenderer } from './webgl';
 import { initCustomizePanel } from './customize';
 import { initSavedLooksPanel } from './savedLooks';
 import { initAiColorAnalysis, type AiLookVibe } from './aiColorAnalysis';
+import { initObsGuide } from './obsGuide';
 
 // =============================================================================
 // HUD bootstrap. Everything in this section runs once at startup to put the
@@ -82,6 +83,7 @@ app.innerHTML = `
         <button id="uploadBtn" type="button">Upload makeup photo</button>
         <input id="fileInput" type="file" accept="image/*" />
         <button type="button" class="hud-btn-secondary" id="aiColorReadTrigger">AI color read</button>
+        <button type="button" class="hud-btn-secondary" id="obsGuideBtn">Use in Zoom</button>
       </div>
       <div class="sliders">${sliderRowsHTML}</div>
       <label class="no-makeup-row">
@@ -180,6 +182,7 @@ const noseIntensityEl = document.querySelector<HTMLInputElement>('#noseIntensity
 // Initialize the WebGL renderer + customize panel now that all DOM exists.
 const renderer = createMakeupRenderer(glCanvas);
 initCustomizePanel();
+initObsGuide();
 initSavedLooksPanel({
   makeupColors,
   sliderIds: sliderDefs.map((s) => s.id),

@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>BlushedCV ✿ Virtual Makeup</title>
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;1,400&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet"/>
+  <style>
+    :root {
+      --rose:    #f4a7b9;
+      --blush:   #fce4ec;
+      --petal:   #fdf0f5;
+      --mauve:   #c97fa0;
+      --deep:    #7d3f5e;
+      --sand:    #fff5f8;
+      --gold:    #e8b4c8;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'DM Sans', sans-serif;
+      background: var(--sand);
+      color: var(--deep);
+      overflow-x: hidden;
+    }
+
+    /* ── NOISE TEXTURE overlay ── */
+    body::before {
+      content: '';
+      position: fixed; inset: 0; z-index: 0; pointer-events: none;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E");
+      opacity: .4;
+    }
+
+    /* ── HERO ── */
+    .hero {
+      position: relative; z-index: 1;
+      min-height: 100vh;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      padding: 3rem 1.5rem 2rem;
+      background: radial-gradient(ellipse 80% 70% at 50% 20%, #fde8f0 0%, var(--sand) 70%);
+      overflow: hidden;
+    }
+
+    /* floating blobs */
+    .blob {
+      position: absolute; border-radius: 50%;
+      background: radial-gradient(circle, #f9c9d8 0%, transparent 70%);
+      filter: blur(40px); opacity: .5; pointer-events: none;
+      animation: drift 8s ease-in-out infinite alternate;
+    }
+    .blob-1 { width: 420px; height: 420px; top: -120px; left: -100px; animation-delay: 0s; }
+    .blob-2 { width: 300px; height: 300px; top: 30%; right: -80px; animation-delay: -3s; }
+    .blob-3 { width: 200px; height: 200px; bottom: 0; left: 30%; animation-delay: -5s; }
+
+    @keyframes drift {
+      from { transform: translate(0, 0) scale(1); }
+      to   { transform: translate(20px, 30px) scale(1.05); }
+    }
+
+    /* sparkle SVG stars scattered */
+    .stars-bg {
+      position: absolute; inset: 0; pointer-events: none; z-index: 0;
+      overflow: hidden;
+    }
+
+    .star {
+      position: absolute;
+      animation: twinkle 3s ease-in-out infinite;
+    }
+    @keyframes twinkle {
+      0%, 100% { opacity: .2; transform: scale(1); }
+      50%       { opacity: 1;  transform: scale(1.3); }
+    }
+
+    /* ── LOGO ROW ── */
+    .logo-row {
+      position: relative; z-index: 2;
+      display: flex; align-items: center; gap: .6rem;
+      margin-bottom: 2.5rem;
+      animation: fadeDown .8s ease both;
+    }
+    .logo-dot {
+      width: 11px; height: 11px; border-radius: 50%;
+      background: var(--mauve); opacity: .7;
+    }
+    .logo-text {
+      font-family: 'Playfair Display', serif;
+      font-size: .95rem; letter-spacing: .25em;
+      text-transform: uppercase; color: var(--mauve);
+    }
+
+    /* ── CLIPART ROW ── */
+    .clipart-row {
+      position: relative; z-index: 2;
+      display: flex; gap: 1.2rem; margin-bottom: 2rem;
+      animation: fadeDown .9s .1s ease both;
+    }
+    .clipart-row svg { filter: drop-shadow(0 2px 6px rgba(200,100,140,.25)); }
+
+    /* ── HEADLINE ── */
+    h1 {
+      position: relative; z-index: 2;
+      font-family: 'Playfair Display', serif;
+      font-size: clamp(2.6rem, 7vw, 5.2rem);
+      line-height: 1.08; text-align: center;
+      color: var(--deep);
+      animation: fadeDown 1s .15s ease both;
+    }
+    h1 em {
+      font-style: italic; color: var(--mauve);
+    }
+
+    /* ── TAGLINE ── */
+    .tagline {
+      position: relative; z-index: 2;
+      font-size: clamp(.95rem, 2.5vw, 1.2rem);
+      font-weight: 300; color: #a06080;
+      text-align: center; max-width: 520px;
+      margin: 1.4rem auto 0;
+      line-height: 1.7;
+      animation: fadeDown 1s .25s ease both;
+    }
+
+    /* ── CTA BUTTON ── */
+    .cta-wrap {
+      position: relative; z-index: 2;
+      margin-top: 2.5rem;
+      animation: fadeDown 1s .35s ease both;
+    }
+    .cta {
+      display: inline-flex; align-items: center; gap: .65rem;
+      padding: .9rem 2.2rem;
+      background: linear-gradient(135deg, var(--mauve), #e07fa8);
+      color: #fff; font-family: 'DM Sans', sans-serif;
+      font-size: 1rem; font-weight: 500; letter-spacing: .04em;
+      border: none; border-radius: 50px; cursor: pointer;
+      text-decoration: none;
+      box-shadow: 0 8px 28px rgba(180,80,120,.35);
+      transition: transform .2s, box-shadow .2s;
+    }
+    .cta:hover {
+      transform: translateY(-3px) scale(1.03);
+      box-shadow: 0 14px 36px rgba(180,80,120,.45);
+    }
+    .cta svg { flex-shrink: 0; }
+
+    /* ── SCROLL HINT ── */
+    .scroll-hint {
+      position: relative; z-index: 2;
+      margin-top: 3rem; display: flex; flex-direction: column; align-items: center; gap: .4rem;
+      color: var(--gold); font-size: .78rem; letter-spacing: .12em; text-transform: uppercase;
+      animation: fadeDown 1s .5s ease both;
+    }
+    .scroll-hint .arrow {
+      width: 22px; height: 22px;
+      animation: bounce 1.6s ease-in-out infinite;
+    }
+    @keyframes bounce {
+      0%, 100% { transform: translateY(0); }
+      50%       { transform: translateY(6px); }
+    }
+
+    /* ── FEATURES SECTION ── */
+    .features {
+      position: relative; z-index: 1;
+      background: #fff8fa;
+      padding: 5rem 1.5rem 4rem;
+    }
+    .features-inner { max-width: 900px; margin: 0 auto; }
+
+    .section-label {
+      font-size: .78rem; letter-spacing: .25em; text-transform: uppercase;
+      color: var(--mauve); font-weight: 500; text-align: center;
+      margin-bottom: .7rem;
+    }
+    .section-title {
+      font-family: 'Playfair Display', serif;
+      font-size: clamp(1.7rem, 4vw, 2.6rem);
+      text-align: center; color: var(--deep);
+      margin-bottom: 3rem;
+      line-height: 1.2;
+    }
+
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+      gap: 1.4rem;
+    }
+
+    .card {
+      background: var(--sand);
+      border: 1.5px solid #f5d0de;
+      border-radius: 20px;
+      padding: 2rem 1.6rem;
+      text-align: center;
+      transition: transform .2s, box-shadow .2s;
+    }
+    .card:hover {
+      transform: translateY(-5px);
+      box-shadow: 0 12px 32px rgba(200,100,140,.15);
+    }
+
+    .card-icon {
+      width: 58px; height: 58px; margin: 0 auto 1.1rem;
+      background: linear-gradient(135deg, #fce4ec, #ffd6e7);
+      border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 1.7rem;
+    }
+    .card h3 {
+      font-family: 'Playfair Display', serif;
+      font-size: 1.1rem; color: var(--deep);
+      margin-bottom: .5rem;
+    }
+    .card p {
+      font-size: .9rem; color: #a06080; line-height: 1.65;
+    }
+
+    /* ── HOW IT WORKS ── */
+    .how {
+      position: relative; z-index: 1;
+      background: linear-gradient(160deg, #fde8f0, #fff8fa);
+      padding: 5rem 1.5rem 5rem;
+    }
+    .how-inner { max-width: 780px; margin: 0 auto; }
+
+    .steps {
+      display: flex; flex-direction: column; gap: 1.8rem;
+      margin-top: 2.6rem;
+    }
+    .step {
+      display: flex; align-items: flex-start; gap: 1.3rem;
+    }
+    .step-num {
+      flex-shrink: 0;
+      width: 44px; height: 44px; border-radius: 50%;
+      background: linear-gradient(135deg, var(--mauve), #e07fa8);
+      color: #fff; font-family: 'Playfair Display', serif;
+      font-size: 1.1rem; display: flex; align-items: center; justify-content: center;
+      box-shadow: 0 4px 14px rgba(180,80,120,.3);
+    }
+    .step-body h4 {
+      font-family: 'Playfair Display', serif;
+      font-size: 1.05rem; color: var(--deep); margin-bottom: .3rem;
+    }
+    .step-body p {
+      font-size: .9rem; color: #a06080; line-height: 1.65;
+    }
+
+    /* ── DIVIDER PETALS ── */
+    .petal-divider {
+      text-align: center; font-size: 1.4rem; letter-spacing: .5rem;
+      padding: 1rem 0;
+      color: var(--rose);
+    }
+
+    /* ── FOOTER ── */
+    footer {
+      position: relative; z-index: 1;
+      background: var(--deep);
+      color: #f5c8d8;
+      text-align: center;
+      padding: 2.5rem 1.5rem;
+      font-size: .85rem;
+      letter-spacing: .06em;
+    }
+    footer .footer-logo {
+      font-family: 'Playfair Display', serif;
+      font-size: 1.4rem; color: #fff;
+      margin-bottom: .4rem;
+    }
+
+    /* ── ANIMATIONS ── */
+    @keyframes fadeDown {
+      from { opacity: 0; transform: translateY(-18px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ═══════════════ HERO ═══════════════ -->
+<section class="hero">
+  <div class="blob blob-1"></div>
+  <div class="blob blob-2"></div>
+  <div class="blob blob-3"></div>
+
+  <!-- scattered sparkle stars -->
+  <div class="stars-bg" aria-hidden="true">
+    <!-- generated inline stars -->
+    <svg class="star" style="top:8%;left:12%;animation-delay:.3s" width="14" height="14" viewBox="0 0 24 24"><path fill="#f4a7b9" d="M12 2l1.8 5.5H19l-4.5 3.3 1.7 5.2L12 13l-4.2 3 1.7-5.2L5 7.5h5.2z"/></svg>
+    <svg class="star" style="top:15%;right:10%;animation-delay:1s" width="10" height="10" viewBox="0 0 24 24"><path fill="#c97fa0" d="M12 2l1.8 5.5H19l-4.5 3.3 1.7 5.2L12 13l-4.2 3 1.7-5.2L5 7.5h5.2z"/></svg>
+    <svg class="star" style="top:60%;left:5%;animation-delay:2s" width="12" height="12" viewBox="0 0 24 24"><path fill="#e8b4c8" d="M12 2l1.8 5.5H19l-4.5 3.3 1.7 5.2L12 13l-4.2 3 1.7-5.2L5 7.5h5.2z"/></svg>
+    <svg class="star" style="top:75%;right:8%;animation-delay:.7s" width="16" height="16" viewBox="0 0 24 24"><path fill="#f4a7b9" d="M12 2l1.8 5.5H19l-4.5 3.3 1.7 5.2L12 13l-4.2 3 1.7-5.2L5 7.5h5.2z"/></svg>
+    <svg class="star" style="top:45%;right:3%;animation-delay:1.8s" width="9" height="9" viewBox="0 0 24 24"><path fill="#c97fa0" d="M12 2l1.8 5.5H19l-4.5 3.3 1.7 5.2L12 13l-4.2 3 1.7-5.2L5 7.5h5.2z"/></svg>
+    <svg class="star" style="top:88%;left:20%;animation-delay:2.5s" width="11" height="11" viewBox="0 0 24 24"><path fill="#f4a7b9" d="M12 2l1.8 5.5H19l-4.5 3.3 1.7 5.2L12 13l-4.2 3 1.7-5.2L5 7.5h5.2z"/></svg>
+  </div>
+
+  <!-- logo label -->
+  <div class="logo-row">
+    <div class="logo-dot"></div>
+    <span class="logo-text">BlushedCV</span>
+    <div class="logo-dot"></div>
+  </div>
+
+  <!-- makeup clipart row -->
+  <div class="clipart-row" aria-hidden="true">
+    <!-- Lipstick -->
+    <svg width="46" height="60" viewBox="0 0 46 60" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <rect x="14" y="28" width="18" height="28" rx="3" fill="#d4748a"/>
+      <rect x="16" y="26" width="14" height="6" rx="2" fill="#c4607a"/>
+      <path d="M16 26 Q23 10 30 26 Z" fill="#e8506c"/>
+      <rect x="18" y="36" width="4" height="14" rx="2" fill="#f0a0b0" opacity=".4"/>
+    </svg>
+    <!-- Mascara wand -->
+    <svg width="18" height="68" viewBox="0 0 18 68" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <rect x="6" y="24" width="6" height="40" rx="3" fill="#8B4A6A"/>
+      <rect x="5" y="10" width="8" height="16" rx="4" fill="#b06080"/>
+      <ellipse cx="9" cy="10" rx="4" ry="3" fill="#c97fa0"/>
+      <!-- bristles -->
+      <line x1="4" y1="28" x2="0" y2="26" stroke="#5c2d47" stroke-width="1.5" stroke-linecap="round"/>
+      <line x1="4" y1="32" x2="0" y2="31" stroke="#5c2d47" stroke-width="1.5" stroke-linecap="round"/>
+      <line x1="4" y1="36" x2="0" y2="36" stroke="#5c2d47" stroke-width="1.5" stroke-linecap="round"/>
+      <line x1="14" y1="28" x2="18" y2="26" stroke="#5c2d47" stroke-width="1.5" stroke-linecap="round"/>
+      <line x1="14" y1="32" x2="18" y2="31" stroke="#5c2d47" stroke-width="1.5" stroke-linecap="round"/>
+      <line x1="14" y1="36" x2="18" y2="36" stroke="#5c2d47" stroke-width="1.5" stroke-linecap="round"/>
+    </svg>
+    <!-- Blush compact -->
+    <svg width="62" height="48" viewBox="0 0 62 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <rect x="4" y="16" width="54" height="28" rx="8" fill="#f7cdd8"/>
+      <rect x="4" y="16" width="54" height="14" rx="8" fill="#efa0b8"/>
+      <ellipse cx="31" cy="34" rx="16" ry="7" fill="#f9b8cc" opacity=".8"/>
+      <ellipse cx="31" cy="34" rx="10" ry="4" fill="#f090a8" opacity=".5"/>
+      <!-- mirror hinge -->
+      <rect x="24" y="13" width="14" height="4" rx="2" fill="#e8a0b8"/>
+    </svg>
+    <!-- Eyeshadow brush -->
+    <svg width="20" height="70" viewBox="0 0 20 70" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <rect x="8" y="18" width="4" height="46" rx="2" fill="#a06080"/>
+      <ellipse cx="10" cy="16" rx="7" ry="10" fill="#f2a8c0"/>
+      <ellipse cx="10" cy="12" rx="5" ry="7" fill="#e890b0"/>
+    </svg>
+    <!-- Glitter star accent -->
+    <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <path d="M18 2 L20.5 14 L32 14 L22.5 21 L26 33 L18 26 L10 33 L13.5 21 L4 14 L15.5 14 Z" fill="#f4a7b9"/>
+      <path d="M18 7 L19.8 14 L26 14 L21 18.2 L22.8 25 L18 21.5 L13.2 25 L15 18.2 L10 14 L16.2 14 Z" fill="#fff" opacity=".5"/>
+    </svg>
+  </div>
+
+  <h1>Save your <em>look</em>,<br/>Wear it live.</h1>
+
+  <p class="tagline">
+    Upload a photo of a makeup look you love and watch it appear on you.
+    Perfect for your next Zoom call, party, or to save a good makeup day forever!
+  </p>
+
+  <div class="cta-wrap">
+    <a class="cta" href="app.html">
+      <!-- sparkle icon -->
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M12 2l1.8 5.5H19l-4.5 3.3 1.7 5.2L12 13l-4.2 3 1.7-5.2L5 7.5h5.2z" fill="#fff"/></svg>
+      Try the Filter ✿
+    </a>
+  </div>
+
+  <div class="scroll-hint">
+    <span>discover more</span>
+    <svg class="arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <polyline points="6 9 12 15 18 9"/>
+    </svg>
+  </div>
+</section>
+
+<!-- ═══════════════ FEATURES ═══════════════ -->
+<section class="features">
+  <div class="features-inner">
+    <p class="section-label">✦ what you can do ✦</p>
+    <h2 class="section-title"> save the look <br/><em style="font-style:italic;color:var(--mauve)"> wear it whenever </em></h2>
+
+    <div class="cards">
+      <div class="card">
+        <div class="card-icon">🪞</div>
+        <h3>Try It Out</h3>
+        <p>Screenshot any makeup inspo online, upload it, and see exactly how that look sits on YOUR face.</p>
+      </div>
+      <div class="card">
+        <div class="card-icon">💻</div>
+        <h3>Glam for Zoom & Meets</h3>
+        <p>Use it as a virtual camera filter during online interviews and video calls. Look polished without a single brush stroke.</p>
+      </div>
+      <div class="card">
+        <div class="card-icon">📸</div>
+        <h3>Save Your Best Days</h3>
+        <p>Had a perfect makeup day? Snap a photo, save the look, and replay it whenever you want! </p>
+      </div>
+      <div class="card">
+        <div class="card-icon">🌸</div>
+        <h3>Instant Inspiration</h3>
+        <p>Scroll Pinterest, grab a photo of your fave celeb's makeup, and use it as your personal beauty guideline.</p>
+      </div>
+      <div class="card">
+        <div class="card-icon">𓆩♡𓆪</div>
+        <h3>Mix & Match Looks</h3>
+        <p>Experiment with bold lips, smoky eyes, or soft glam. Try as many combinations as you want with zero commitment.</p>
+      </div>
+      <div class="card">
+        <div class="card-icon">🪞</div>
+        <h3>Your Virtual Mirror</h3>
+        <p>No makeup remover needed. Practice makeup without a palette.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="petal-divider" aria-hidden="true">✿ ✦ ✿ ✦ ✿</div>
+
+<!-- ═══════════════ HOW IT WORKS ═══════════════ -->
+<section class="how">
+  <div class="how-inner">
+    <p class="section-label">✦ how it works ✦</p>
+    <h2 class="section-title">Three steps to your<br/><em style="font-style:italic;color:var(--mauve)">dream look</em></h2>
+
+    <div class="steps">
+      <div class="step">
+        <div class="step-num">1</div>
+        <div class="step-body">
+          <h4>Upload your inspo ✧˖° </h4>
+          <p>Find a photo of any makeup look you love : a screenshot, a selfie, anything. Upload it to the filter.</p>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">2</div>
+        <div class="step-body">
+          <h4>Take a photo of yourself ♡⸜(˶˃ ᵕ ˂˶)⸝♡ </h4>
+          <p>Use your webcam or upload a photo of your face. The AI detects your facial landmarks automatically.</p>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">3</div>
+        <div class="step-body">
+          <h4>Watch the magic happen ✧˖° </h4>
+          <p>The makeup; Lips, eyes, blush and all, is transferred onto your face in real time. </p>
+        </div>
+      </div>
+    </div>
+
+    <div style="text-align:center;margin-top:3rem;">
+      <a class="cta" href="app.html" style="display:inline-flex;">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M12 2l1.8 5.5H19l-4.5 3.3 1.7 5.2L12 13l-4.2 3 1.7-5.2L5 7.5h5.2z" fill="#fff"/></svg>
+        Open the Filter ✿
+      </a>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════ FOOTER ═══════════════ -->
+<footer>
+  <div class="footer-logo">BlushedCV ✿</div>
+  <p>Virtual Makeup Filter · Made with love ˚ʚ♡ɞ˚ </p>
+</footer>
+
+</body>
+</html>

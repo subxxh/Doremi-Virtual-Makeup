@@ -1,26 +1,11 @@
 """
-Serves the Vite `webgl/dist/` SPA and exposes a small vision API for AI makeup color reads.
-
-**Where to put your Gemini API key (local):**
-Create `.env` next to this file (`app.py`, repo root):
-
-    GEMINI_API_KEY=your-key-from-ai-studio
-
-Create a key: https://aistudio.google.com/apikey
-
-Never commit `.env` — it is listed in `.gitignore`.
-
-Also supported: `GOOGLE_API_KEY` (same value) if you already use that name.
+Serves the landing page at / and the Vite WebGL SPA at /app,
+and exposes a small vision API for AI makeup color reads.
 
 **Hugging Face Space:** add a repository secret named `GEMINI_API_KEY`.
-
-Optional env: `GEMINI_VISION_MODEL` (default `gemini-2.5-flash-lite`). If you hit 429 quota on free tier,
-try another model (e.g. `gemini-2.5-flash`) or enable billing in Google AI Studio / Cloud.
+Create a key: https://aistudio.google.com/apikey
 
 Without a key, `POST /api/analyze-makeup-colors` returns HTTP 503.
-
-Local dev: `uvicorn app:app --reload --port 8000` from repo root, then `npm run dev` in `webgl/`
-(Vite proxies `/api` → localhost:8000).
 """
 
 from __future__ import annotations
@@ -30,30 +15,29 @@ import io
 import json
 import os
 import re
-from typing import Any
-
 from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 _ROOT = Path(__file__).resolve().parent
-# Load from repo root first, then optional `webgl/.env` (fills only keys not already set).
 for _env_path in (_ROOT / ".env", _ROOT / "webgl" / ".env"):
     if _env_path.is_file():
         load_dotenv(_env_path, override=False)
+
 _DIST = _ROOT / "webgl" / "dist"
 if not _DIST.is_dir():
     _DIST = _ROOT / "dist"
 
-app = FastAPI(title="Doremi Virtual Makeup API")
+app = FastAPI(title="BlushedCV Virtual Makeup API")
 
 MAX_IMAGE_BYTES = 2_500_000
 
 SYSTEM_PROMPT = """You are a friendly digital beauty guide inside a virtual makeup try-on app.
 You will receive ONE casual webcam-style photo where a face is usually visible.
-
 Return ONLY valid JSON (no markdown fences) with exactly these keys:
 - headline: string, max ~70 chars, warm and clear, no emoji
 - vibe_tags: array of 3 to 6 short strings (micro-trend tags like "coquette blush" / "clean girl")
@@ -71,12 +55,9 @@ Return ONLY valid JSON (no markdown fences) with exactly these keys:
   - liner: eyeliner (often deep brown or black)
   - brow: brow fill that harmonizes with hair/photo
   - blush: cheek color that matches blush_colors (prefer pink-red-rose hex; not hot yellow-orange dominant)
-
 The five look_hex colors must be realistic makeup pigments (not neon unless the look calls for it) and must visually harmonize with the text color suggestions.
-
 Tone: friendly, kind, body-positive, inclusive. No insults, no harsh judgments, no certainty about "what you are".
 Do not mention model names or policies. English only.
-
 The user message begins with a STYLE BRIEF the user chose (natural / glam / fun). Follow that brief for every field, including vibe_tags and look_hex."""
 
 _ALLOWED_LOOK_VIBES = frozenset({"natural", "glam", "fun"})
@@ -151,6 +132,17 @@ def _parse_analysis_json(raw: str) -> dict[str, Any]:
         raise HTTPException(status_code=502, detail=f"Model returned invalid JSON: {e}") from e
 
 
+# ── Landing page at / ──
+@app.get("/")
+async def landing():
+    return FileResponse(str(_ROOT / "index.html"))
+
+# ── app.html at /app ──
+@app.get("/app")
+async def makeup_app():
+    return FileResponse(str(_ROOT / "app.html"))
+
+
 @app.post("/api/analyze-makeup-colors")
 async def analyze_makeup_colors(
     image: UploadFile = File(...),
@@ -161,10 +153,8 @@ async def analyze_makeup_colors(
         raise HTTPException(
             status_code=503,
             detail=(
-                "GEMINI_API_KEY is not set in the server process. "
-                "Local: add `GEMINI_API_KEY=...` to a `.env` file next to `app.py` (repo root), then restart uvicorn. "
-                "Or run `export GEMINI_API_KEY=...` in the same terminal before uvicorn. "
-                "Hugging Face: add a Space secret named GEMINI_API_KEY (`.env` is not shipped in Docker builds)."
+                "GEMINI_API_KEY is not set. "
+                "Hugging Face: add a Space secret named GEMINI_API_KEY."
             ),
         )
 
@@ -176,22 +166,15 @@ async def analyze_makeup_colors(
 
     vibe_key = look_vibe.strip().lower()
     if vibe_key not in _ALLOWED_LOOK_VIBES:
-        raise HTTPException(
-            status_code=400,
-            detail="look_vibe must be one of: natural, glam, fun.",
-        )
+        raise HTTPException(status_code=400, detail="look_vibe must be one of: natural, glam, fun.")
 
     try:
         import google.generativeai as genai
         from PIL import Image
     except ImportError as e:
-        raise HTTPException(
-            status_code=500,
-            detail="Server missing Gemini deps. Run: pip install google-generativeai pillow",
-        ) from e
+        raise HTTPException(status_code=500, detail="Server missing Gemini deps.") from e
 
     genai.configure(api_key=api_key)
-    # 2.5 Flash-Lite: fast, multimodal (incl. images), cost-efficient per Google AI docs.
     model_name = os.environ.get("GEMINI_VISION_MODEL", "gemini-2.5-flash-lite").strip() or "gemini-2.5-flash-lite"
 
     try:
@@ -201,10 +184,7 @@ async def analyze_makeup_colors(
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Could not read image: {e!s}") from e
 
-    model = genai.GenerativeModel(
-        model_name=model_name,
-        system_instruction=SYSTEM_PROMPT,
-    )
+    model = genai.GenerativeModel(model_name=model_name, system_instruction=SYSTEM_PROMPT)
 
     style_block = _LOOK_VIBE_INSTRUCTIONS[vibe_key]
     user_text = (
@@ -222,12 +202,7 @@ async def analyze_makeup_colors(
 
     def _is_quota_error(exc: BaseException) -> bool:
         s = str(exc).lower()
-        return (
-            "429" in str(exc)
-            or "quota" in s
-            or "resource exhausted" in s
-            or "rate limit" in s
-        )
+        return "429" in str(exc) or "quota" in s or "resource exhausted" in s or "rate limit" in s
 
     response = None
     last_exc: BaseException | None = None
@@ -258,38 +233,24 @@ async def analyze_makeup_colors(
     try:
         raw = response.text
     except ValueError as e:
-        raise HTTPException(
-            status_code=502,
-            detail="Gemini returned no text (blocked or empty). Try another photo or model.",
-        ) from e
+        raise HTTPException(status_code=502, detail="Gemini returned no text (blocked or empty).") from e
 
     if not raw or not raw.strip():
         raise HTTPException(status_code=502, detail="Empty response from Gemini.")
 
     data = _parse_analysis_json(raw)
-    required = [
-        "headline",
-        "vibe_tags",
-        "undertone_read",
-        "lip_colors",
-        "eye_colors",
-        "blush_colors",
-        "liner_brow",
-        "tips",
-        "confidence_note",
-        "disclaimer",
-        "look_hex",
-    ]
+    required = ["headline", "vibe_tags", "undertone_read", "lip_colors", "eye_colors",
+                "blush_colors", "liner_brow", "tips", "confidence_note", "disclaimer", "look_hex"]
     missing = [k for k in required if k not in data]
     if missing:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Model JSON missing keys: {', '.join(missing)}",
-        )
+        raise HTTPException(status_code=502, detail=f"Model JSON missing keys: {', '.join(missing)}")
     _validate_look_hex(data)
     data["disclaimer"] = ""
     return {"ok": True, "analysis": data}
 
 
-# Static SPA — register API routes above this line.
-app.mount("/", StaticFiles(directory=str(_DIST), html=True), name="static")
+# Static assets (favicon, icons, style.css, assets/) served from root
+app.mount("/assets", StaticFiles(directory=str(_ROOT / "assets")), name="assets")
+
+# WebGL app static files served at /app/ path
+app.mount("/app", StaticFiles(directory=str(_DIST), html=True), name="webgl")

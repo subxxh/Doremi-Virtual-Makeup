@@ -78,7 +78,7 @@ app.innerHTML = `
     <canvas id="overlay"></canvas>
     <div class="hud">
       <div class="hud-title">Doremi Virtual Makeup</div>
-      <div class="hud-hint"><kbd>D</kbd> toggles landmark dots + indices</div>
+      <div class="hud-hint"><kbd>D</kbd> toggles landmark dots &nbsp;·&nbsp; <kbd>H</kbd> hides panels</div>
       <div class="hud-actions">
         <button id="uploadBtn" type="button">Upload makeup photo</button>
         <input id="fileInput" type="file" accept="image/*" />
@@ -195,8 +195,25 @@ initSavedLooksPanel({
 // =============================================================================
 
 let showDebug = false;
+let showSidePanels = true;
 window.addEventListener('keydown', (e) => {
   if (e.key.toLowerCase() === 'd') showDebug = !showDebug;
+
+  if (e.key.toLowerCase() === 'h') {
+    showSidePanels = !showSidePanels;
+    const hud = document.querySelector<HTMLElement>('.hud');
+    const customizeBtn = document.querySelector<HTMLElement>('#customizeBtn');
+    const customizePanel = document.querySelector<HTMLElement>('#customizePanel');
+    const savedLooksBtn = document.querySelector<HTMLElement>('.saved-looks-btn');
+    const savedLooksPanel = document.querySelector<HTMLElement>('.saved-looks-panel');
+    for (const el of [hud, customizeBtn, savedLooksBtn]) {
+      if (el) el.style.visibility = showSidePanels ? '' : 'hidden';
+    }
+    if (!showSidePanels) {
+      if (customizePanel) customizePanel.hidden = true;
+      if (savedLooksPanel) savedLooksPanel.hidden = true;
+    }
+  }
 });
 
 function resizeCanvases() {

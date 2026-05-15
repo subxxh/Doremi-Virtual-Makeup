@@ -11,7 +11,7 @@
 
 ## Demo
 
-- Live on Hugging Face Spaces: <https://huggingface.co/spaces/subxxh/Blushed.CV>
+- Live on Hugging Face Spaces: <https://huggingface.co/spaces/abdonkath/BlushedCV>
   
 ## Tech Stack
 

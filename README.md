@@ -16,6 +16,7 @@ A real-time virtual makeup try-on app powered by WebGL + MediaPipe, with AI colo
 
 ## Demo
 
+Hugging Face: https://huggingface.co/spaces/abdonkath/BlushedCV
 > Video coming soon!
 
 ---

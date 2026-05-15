@@ -1,1 +1,17 @@
+# Environment
 .env
+
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Node / Vite
+webgl/node_modules/
+webgl/dist/
+webgl/.vite/
+
+# OS
+.DS_Store
+Thumbs.db

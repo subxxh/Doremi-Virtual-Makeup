@@ -4,9 +4,28 @@ A real-time virtual makeup try-on app powered by WebGL + MediaPipe, with AI colo
 
 ---
 
+## Features
+
+- **Real-time makeup transfer** — upload any inspo photo and watch the look appear on your face live via webcam
+- **AI color analysis** — Gemini reads your face and suggests flattering lip, eye, blush, and liner shades matched to your undertone
+- **Multiple look vibes** — choose Natural, Glam, or Fun to tailor the AI's color recommendations
+- **Save & replay looks** — capture a good makeup day and reapply it anytime
+- **Zoom & video call ready** — use it as a virtual camera filter during online meetings
+
+---
+
 ## Demo
 
 > Video coming soon!
+
+---
+
+## Tech Stack
+
+- **Backend:** FastAPI + Uvicorn
+- **Frontend:** TypeScript + WebGL + Vite
+- **Face tracking:** MediaPipe
+- **AI analysis:** Google Gemini (`gemini-2.5-flash-lite`)
 
 ---
 
@@ -15,6 +34,7 @@ A real-time virtual makeup try-on app powered by WebGL + MediaPipe, with AI colo
 - **Python 3.10+**
 - **Node.js 18+** and **npm**
 - A **Gemini API key** — get one free at [aistudio.google.com/apikey](https://aistudio.google.com/apikey)
+- **OBS Studio** _(required to use as a virtual camera in Zoom or other video call apps)_ — download at [obsproject.com](https://obsproject.com)
 
 ---
 
@@ -48,6 +68,7 @@ pip install -r requirements.txt
 ```
 
 > If you get a script execution error, run this first:
+>
 > ```powershell
 > Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
 > ```
@@ -144,17 +165,8 @@ Then open [http://localhost:8000](http://localhost:8000) — the landing page lo
 
 ## Routes
 
-| Route | Description |
-|---|---|
-| `/` | Landing page |
-| `/app` | Virtual makeup try-on app |
+| Route                        | Description                       |
+| ---------------------------- | --------------------------------- |
+| `/`                          | Landing page                      |
+| `/app`                       | Virtual makeup try-on app         |
 | `/api/analyze-makeup-colors` | AI color analysis endpoint (POST) |
-
----
-
-## Tech Stack
-
-- **Backend:** FastAPI + Uvicorn
-- **Frontend:** TypeScript + WebGL + Vite
-- **Face tracking:** MediaPipe
-- **AI analysis:** Google Gemini (`gemini-2.5-flash-lite`)
